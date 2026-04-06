@@ -5,8 +5,7 @@ const DISPLAY_TYPES = {
   pharmacists: "Pharmacist Schedule"
 };
 
-const RANGE_REGEX =
-  /(\d{1,2}\/\d{1,2}\/\d{2,4})\s*\D+\s*(\d{1,2}\/\d{1,2}\/\d{2,4})/i;
+const DEFAULT_FACILITY = "Las Palmas Medical Center";
 
 function cleanCell(value) {
   if (value === undefined || value === null) {
@@ -29,6 +28,12 @@ function parseDateValue(value) {
 
   if (/^\d{1,2}$/.test(normalized)) {
     return null;
+  }
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+    const [year, month, day] = normalized.split("-").map((part) => Number.parseInt(part, 10));
+    const parsed = new Date(year, month - 1, day);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
   }
 
   const parts = normalized.split("/");
@@ -61,104 +66,117 @@ function formatDisplayDate(date) {
   }).format(date);
 }
 
-function lastUsefulColumn(headerRow, datesRow) {
+function formatShortDate(date) {
+  const shortYear = String(date.getFullYear()).slice(-2);
+  return `${date.getMonth() + 1}/${date.getDate()}/${shortYear}`;
+}
+
+function addDays(date, count) {
+  const next = new Date(date);
+  next.setDate(next.getDate() + count);
+  return next;
+}
+
+function getInclusiveDayCount(startDate, endDate) {
+  const startUtc = Date.UTC(startDate.getFullYear(), startDate.getMonth(), startDate.getDate());
+  const endUtc = Date.UTC(endDate.getFullYear(), endDate.getMonth(), endDate.getDate());
+  return Math.floor((endUtc - startUtc) / 86400000) + 1;
+}
+
+function lastUsefulColumn(headerRow, datesRow, startColumnIndex) {
   const maxLength = Math.max(headerRow.length, datesRow.length);
 
-  for (let index = maxLength - 1; index >= 1; index -= 1) {
+  for (let index = maxLength - 1; index > startColumnIndex; index -= 1) {
     if (cleanCell(headerRow[index]) || cleanCell(datesRow[index])) {
       return index;
     }
   }
 
-  return 0;
+  return startColumnIndex;
 }
 
-function inferColumns(headerRow, datesRow, startDate) {
-  const endIndex = lastUsefulColumn(headerRow, datesRow);
+function findHeaderCell(rows) {
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+    const row = rows[rowIndex] ?? [];
 
-  if (endIndex === 0) {
+    for (let columnIndex = 0; columnIndex < row.length; columnIndex += 1) {
+      const cellValue = cleanCell(row[columnIndex]).toLowerCase();
+
+      if (cellValue.includes("name/date")) {
+        return { rowIndex, columnIndex };
+      }
+    }
+  }
+
+  return null;
+}
+
+function inferColumns(headerRow, datesRow, nameColumnIndex, startDate, endDate) {
+  const endIndex = lastUsefulColumn(headerRow, datesRow, nameColumnIndex);
+  const expectedColumnCount = getInclusiveDayCount(startDate, endDate);
+  const discoveredColumnCount = Math.max(0, endIndex - nameColumnIndex);
+
+  if (discoveredColumnCount === 0) {
     return [];
   }
 
+  if (discoveredColumnCount !== expectedColumnCount) {
+    throw new Error(
+      `The provided date range covers ${expectedColumnCount} day${expectedColumnCount === 1 ? "" : "s"}, but the schedule row after Name/Date contains ${discoveredColumnCount} date column${discoveredColumnCount === 1 ? "" : "s"}.`
+    );
+  }
+
   const columns = [];
-  let currentMonth = startDate ? startDate.getMonth() : 0;
-  let currentYear = startDate ? startDate.getFullYear() : new Date().getFullYear();
-  let previousDay = null;
 
-  for (let columnIndex = 1; columnIndex <= endIndex; columnIndex += 1) {
-    const rawDateCell = cleanCell(datesRow[columnIndex]);
+  for (let offset = 0; offset < expectedColumnCount; offset += 1) {
+    const columnIndex = nameColumnIndex + 1 + offset;
+    const actualDate = addDays(startDate, offset);
     const rawHeaderCell = cleanCell(headerRow[columnIndex]);
-
-    if (!rawDateCell && !rawHeaderCell) {
-      continue;
-    }
-
-    let actualDate = parseDateValue(rawDateCell);
-
-    if (!actualDate && /^\d{1,2}$/.test(rawDateCell)) {
-      const day = Number.parseInt(rawDateCell, 10);
-
-      if (previousDay !== null && day < previousDay) {
-        currentMonth += 1;
-
-        if (currentMonth > 11) {
-          currentMonth = 0;
-          currentYear += 1;
-        }
-      }
-
-      actualDate = new Date(currentYear, currentMonth, day);
-      previousDay = day;
-    } else if (actualDate) {
-      previousDay = actualDate.getDate();
-    }
-
-    const label = actualDate ? formatDisplayDate(actualDate) : rawHeaderCell || rawDateCell;
+    const rawDateCell = cleanCell(datesRow[columnIndex]);
 
     columns.push({
       index: columnIndex,
       weekdayLabel: rawHeaderCell,
       dayLabel: rawDateCell,
-      label,
-      isoDate: actualDate ? formatIsoDate(actualDate) : null
+      label: formatDisplayDate(actualDate),
+      isoDate: formatIsoDate(actualDate)
     });
   }
 
   return columns;
 }
 
-function findHeaderRow(rows) {
-  return rows.findIndex((row) => cleanCell(row[0]).toLowerCase().includes("name/date"));
-}
+function isLikelyEmployeeRow(row, nameColumnIndex, columns) {
+  const employeeName = cleanCell(row[nameColumnIndex]);
 
-function findRangeText(rows) {
-  for (const row of rows) {
-    for (const cell of row) {
-      const text = cleanCell(cell);
-
-      if (RANGE_REGEX.test(text)) {
-        return text.match(RANGE_REGEX)?.[0] ?? text;
-      }
-    }
+  if (!employeeName) {
+    return false;
   }
 
-  return "";
+  const filledAssignments = columns.reduce((count, column) => {
+    return cleanCell(row[column.index]) ? count + 1 : count;
+  }, 0);
+
+  return filledAssignments > 0;
 }
 
-function findFirstMeaningful(rows, preferredMatch) {
-  const flattened = rows
-    .flatMap((row) => row)
-    .map(cleanCell)
-    .filter(Boolean);
+export function parseScheduleWorkbook(
+  fileSource,
+  scheduleType,
+  originalFileName,
+  { startDate: startDateInput, endDate: endDateInput } = {}
+) {
+  const startDate = parseDateValue(startDateInput);
+  const endDate = parseDateValue(endDateInput);
 
-  const preferred = flattened.find((value) =>
-    value.toLowerCase().includes(preferredMatch.toLowerCase())
-  );
+  if (!startDate || !endDate) {
+    throw new Error("A valid schedule start and end date are required for upload.");
+  }
 
-  return preferred ?? flattened[0] ?? preferredMatch;
-}
+  if (endDate < startDate) {
+    throw new Error("The schedule end date cannot be before the start date.");
+  }
 
-export function parseScheduleWorkbook(fileSource, scheduleType, originalFileName) {
   const workbook = Buffer.isBuffer(fileSource)
     ? XLSX.read(fileSource, {
         type: "buffer",
@@ -174,30 +192,34 @@ export function parseScheduleWorkbook(fileSource, scheduleType, originalFileName
     defval: ""
   });
 
-  const headerRowIndex = findHeaderRow(rows);
+  const headerCell = findHeaderCell(rows);
 
-  if (headerRowIndex === -1) {
+  if (!headerCell) {
     throw new Error(
-      "We could not find the schedule header row. Please upload the standard LPMC schedule format."
+      'We could not find the row containing "Name/Date". Please upload the standard LPMC schedule format.'
     );
   }
 
+  const { rowIndex: headerRowIndex, columnIndex: nameColumnIndex } = headerCell;
   const datesRowIndex = headerRowIndex + 1;
   const headerRow = rows[headerRowIndex] ?? [];
   const datesRow = rows[datesRowIndex] ?? [];
-  const rangeText = findRangeText(rows.slice(0, headerRowIndex + 2));
-  const rangeMatch = rangeText.match(RANGE_REGEX);
-  const normalizedRangeLabel = rangeMatch ? `${rangeMatch[1]} - ${rangeMatch[2]}` : rangeText;
-  const startDate = rangeMatch ? parseDateValue(rangeMatch[1]) : null;
-  const endDateFromRange = rangeMatch ? parseDateValue(rangeMatch[2]) : null;
-  const columns = inferColumns(headerRow, datesRow, startDate);
+  const columns = inferColumns(headerRow, datesRow, nameColumnIndex, startDate, endDate);
   const employees = [];
 
   for (let rowIndex = datesRowIndex + 1; rowIndex < rows.length; rowIndex += 1) {
     const row = rows[rowIndex] ?? [];
-    const employeeName = cleanCell(row[0]);
+    const employeeName = cleanCell(row[nameColumnIndex]);
 
     if (!employeeName) {
+      continue;
+    }
+
+    if (!isLikelyEmployeeRow(row, nameColumnIndex, columns)) {
+      if (employees.length > 0) {
+        break;
+      }
+
       continue;
     }
 
@@ -211,25 +233,17 @@ export function parseScheduleWorkbook(fileSource, scheduleType, originalFileName
 
   if (employees.length === 0) {
     throw new Error(
-      "The uploaded spreadsheet does not include any employee rows below the date header."
+      'No employee rows with assignments were found below the "Name/Date" header.'
     );
   }
 
-  const finalEndDate =
-    endDateFromRange ??
-    (columns.length > 0 && columns[columns.length - 1].isoDate
-      ? new Date(columns[columns.length - 1].isoDate)
-      : null);
-
   return {
     scheduleType,
-    title:
-      findFirstMeaningful(rows.slice(0, headerRowIndex), DISPLAY_TYPES[scheduleType] ?? "Schedule") ??
-      DISPLAY_TYPES[scheduleType],
-    facility: findFirstMeaningful(rows.slice(0, headerRowIndex), "Las Palmas Medical Center"),
-    rangeLabel: normalizedRangeLabel || "Current schedule",
-    startDate: startDate ? formatIsoDate(startDate) : null,
-    endDate: finalEndDate ? formatIsoDate(finalEndDate) : null,
+    title: DISPLAY_TYPES[scheduleType] ?? "Schedule",
+    facility: DEFAULT_FACILITY,
+    rangeLabel: `${formatShortDate(startDate)} - ${formatShortDate(endDate)}`,
+    startDate: formatIsoDate(startDate),
+    endDate: formatIsoDate(endDate),
     columns,
     employees,
     sourceFileName: originalFileName

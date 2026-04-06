@@ -59,6 +59,19 @@ function getScheduleTypeLabel(scheduleType) {
   return scheduleType === "pharmacists" ? "Pharmacist" : "Tech";
 }
 
+function createUploadRangeState(schedules = {}) {
+  return {
+    techs: {
+      startDate: schedules.techs?.startDate || "",
+      endDate: schedules.techs?.endDate || ""
+    },
+    pharmacists: {
+      startDate: schedules.pharmacists?.startDate || "",
+      endDate: schedules.pharmacists?.endDate || ""
+    }
+  };
+}
+
 async function apiRequest(path, options = {}) {
   const response = await fetch(path, {
     credentials: "include",
@@ -819,7 +832,7 @@ function ChangePasswordSection({ isSystem = false, onBack }) {
 
 // ─── Upload Card ─────────────────────────────────────────────────────────────
 
-function UploadCard({ title, schedule, onUpload, loading }) {
+function UploadCard({ title, schedule, uploadDates, onUploadDateChange, onUpload, loading }) {
   return (
     <article className="upload-card">
       <div className="upload-card-info">
@@ -831,26 +844,74 @@ function UploadCard({ title, schedule, onUpload, loading }) {
             : "Upload an Excel file to publish the schedule."}
         </p>
       </div>
-      <label className="upload-button" aria-label={`Upload ${title}`}>
-        <span>{loading ? "Uploading…" : `Upload ${title}`}</span>
-        <input
-          type="file"
-          accept=".xlsx,.xls,.csv"
-          onChange={(e) => {
-            const file = e.target.files?.[0];
-            if (file) onUpload(file);
-            e.target.value = "";
-          }}
-          disabled={loading}
-        />
-      </label>
+
+      <div className="upload-card-actions">
+        <div className="form-grid upload-date-grid">
+          <label className="field">
+            <span>Start date</span>
+            <input
+              type="date"
+              value={uploadDates.startDate}
+              onChange={(e) => onUploadDateChange("startDate", e.target.value)}
+              disabled={loading}
+            />
+          </label>
+
+          <label className="field">
+            <span>End date</span>
+            <input
+              type="date"
+              value={uploadDates.endDate}
+              onChange={(e) => onUploadDateChange("endDate", e.target.value)}
+              disabled={loading}
+            />
+          </label>
+        </div>
+
+        <p className="upload-meta-note">
+          Parsing starts at the row that contains <strong>Name/Date</strong>. Enter the posted date
+          range here before uploading.
+        </p>
+
+        <label className="upload-button" aria-label={`Upload ${title}`}>
+          <span>{loading ? "Uploading..." : `Upload ${title}`}</span>
+          <input
+            type="file"
+            accept=".xlsx,.xls,.csv"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) onUpload(file);
+              e.target.value = "";
+            }}
+            disabled={loading}
+          />
+        </label>
+      </div>
     </article>
   );
 }
 
 // ─── Admin Panel ─────────────────────────────────────────────────────────────
 
-function AdminPanel({ open, authenticated, isSystemUser, loginForm, onLoginChange, onLoginSubmit, onLogout, loading, schedules, onUpload, uploadState, requests, onReview, reviewLoadingId, closePanel }) {
+function AdminPanel({
+  open,
+  authenticated,
+  isSystemUser,
+  loginForm,
+  onLoginChange,
+  onLoginSubmit,
+  onLogout,
+  loading,
+  schedules,
+  uploadDates,
+  onUploadDateChange,
+  onUpload,
+  uploadState,
+  requests,
+  onReview,
+  reviewLoadingId,
+  closePanel
+}) {
   const [showPassword, setShowPassword] = useState(false);
   const [view, setView] = useState("dashboard");
 
@@ -948,12 +1009,16 @@ function AdminPanel({ open, authenticated, isSystemUser, loginForm, onLoginChang
                   <UploadCard
                     title="Tech schedule"
                     schedule={schedules.techs}
+                    uploadDates={uploadDates.techs}
+                    onUploadDateChange={(field, value) => onUploadDateChange("techs", field, value)}
                     onUpload={(file) => onUpload("techs", file)}
                     loading={uploadState.techs}
                   />
                   <UploadCard
                     title="Pharmacist schedule"
                     schedule={schedules.pharmacists}
+                    uploadDates={uploadDates.pharmacists}
+                    onUploadDateChange={(field, value) => onUploadDateChange("pharmacists", field, value)}
                     onUpload={(file) => onUpload("pharmacists", file)}
                     loading={uploadState.pharmacists}
                   />
@@ -1009,6 +1074,7 @@ export default function App() {
   const [ptoSubmitting, setPtoSubmitting] = useState(false);
   const [reviewLoadingId, setReviewLoadingId] = useState("");
   const [uploadState, setUploadState] = useState({ techs: false, pharmacists: false });
+  const [uploadDates, setUploadDates] = useState(() => createUploadRangeState());
   const [loginForm, setLoginForm] = useState({ username: "", password: "" });
   const [ptoForm, setPtoForm] = useState({
     employeeName: "",
@@ -1063,6 +1129,7 @@ export default function App() {
         apiRequest("/api/auth/session")
       ]);
       setSchedules(schedulePayload.schedules);
+      setUploadDates(createUploadRangeState(schedulePayload.schedules));
       setIsAdmin(sessionPayload.authenticated);
       setIsSystemUser(Boolean(sessionPayload.isSystem));
       if (!schedulePayload.schedules.techs && schedulePayload.schedules.pharmacists) {
@@ -1087,6 +1154,16 @@ export default function App() {
 
   function updatePtoForm(field, value) {
     setPtoForm((c) => ({ ...c, [field]: value }));
+  }
+
+  function updateUploadDates(scheduleType, field, value) {
+    setUploadDates((current) => ({
+      ...current,
+      [scheduleType]: {
+        ...current[scheduleType],
+        [field]: value
+      }
+    }));
   }
 
   function resetFilters() {
@@ -1137,11 +1214,25 @@ export default function App() {
   }
 
   async function handleUpload(scheduleType, file) {
+    const selectedRange = uploadDates[scheduleType];
+
+    if (!selectedRange.startDate || !selectedRange.endDate) {
+      setPageError("Choose the schedule start and end date before uploading.");
+      return;
+    }
+
+    if (selectedRange.endDate < selectedRange.startDate) {
+      setPageError("The schedule end date cannot be before the start date.");
+      return;
+    }
+
     setUploadState((c) => ({ ...c, [scheduleType]: true }));
     setPageError("");
     try {
       const payload = new FormData();
       payload.append("file", file);
+      payload.append("startDate", selectedRange.startDate);
+      payload.append("endDate", selectedRange.endDate);
       const response = await apiRequest(`/api/admin/upload/${scheduleType}`, {
         method: "POST",
         body: payload
@@ -1274,6 +1365,8 @@ export default function App() {
         onLogout={handleLogout}
         loading={authLoading}
         schedules={schedules}
+        uploadDates={uploadDates}
+        onUploadDateChange={updateUploadDates}
         onUpload={handleUpload}
         uploadState={uploadState}
         requests={visibleRequests}

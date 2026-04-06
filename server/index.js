@@ -2,6 +2,7 @@ import "dotenv/config";
 import express from "express";
 import crypto from "node:crypto";
 import { existsSync } from "node:fs";
+import { mkdir, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import multer from "multer";
@@ -25,6 +26,7 @@ import {
   initializeStore,
   listPtoRequests,
   saveSchedule,
+  STORE_MODE,
   updatePtoRequestStatus
 } from "./store.js";
 import { parseScheduleWorkbook } from "./scheduleParser.js";
@@ -33,11 +35,13 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const projectRoot = path.resolve(__dirname, "..");
 const distDir = path.join(projectRoot, "dist");
+const uploadsDir = path.join(__dirname, "data", "uploads");
 
 const app = express();
 const port = Number.parseInt(process.env.PORT ?? "3001", 10);
 const ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 const MAX_UPLOAD_BYTES = Math.floor(4.5 * 1024 * 1024);
+const HAS_BLOB_STORAGE = Boolean(process.env.BLOB_READ_WRITE_TOKEN);
 
 app.set("trust proxy", 1);
 
@@ -148,6 +152,26 @@ function validatePtoRequest(body) {
   };
 }
 
+function validateScheduleUpload(body) {
+  const startDate = String(body?.startDate ?? "");
+  const endDate = String(body?.endDate ?? "");
+  const parsedStart = parseIsoDateInput(startDate);
+  const parsedEnd = parseIsoDateInput(endDate);
+
+  if (!parsedStart || !parsedEnd) {
+    return { error: "Please choose a valid schedule start and end date before uploading." };
+  }
+
+  if (parsedEnd < parsedStart) {
+    return { error: "The schedule end date cannot be before the start date." };
+  }
+
+  return {
+    startDate,
+    endDate
+  };
+}
+
 function sanitizeBaseName(originalFileName) {
   const extension = path.extname(originalFileName) || ".xlsx";
 
@@ -178,9 +202,40 @@ async function deleteBlobIfPresent(pathname) {
   }
 }
 
+async function saveFileLocally(buffer, originalFileName) {
+  await mkdir(uploadsDir, { recursive: true });
+  const extension = path.extname(originalFileName).toLowerCase() || ".xlsx";
+  const safeBase = sanitizeBaseName(originalFileName) || "schedule";
+  const fileName = `${Date.now()}-${safeBase}${extension}`;
+  const filePath = path.join(uploadsDir, fileName);
+  await writeFile(filePath, buffer);
+  return { fileName, filePath };
+}
+
+async function deleteLocalFileIfPresent(fileName) {
+  if (!fileName) {
+    return;
+  }
+
+  const safeFileName = path.basename(fileName);
+  const filePath = path.join(uploadsDir, safeFileName);
+
+  try {
+    await unlink(filePath);
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      console.warn(`Unable to delete local upload ${safeFileName}.`, error);
+    }
+  }
+}
+
 app.get("/api/health", async (_request, response) => {
   await initializeStore();
-  response.json({ ok: true, storage: "vercel-blob-and-postgres" });
+  response.json({
+    ok: true,
+    storage: STORE_MODE === "postgres" ? "vercel-blob-and-postgres" : "local-json",
+    uploads: HAS_BLOB_STORAGE ? "vercel-blob" : "local-files"
+  });
 });
 
 app.get("/api/auth/session", (request, response) => {
@@ -262,12 +317,27 @@ app.get("/api/schedules/:type/download", async (request, response) => {
 
   const schedule = await getSchedule(scheduleType);
 
-  if (!schedule?.blobDownloadUrl) {
+  if (schedule?.blobDownloadUrl) {
+    response.redirect(schedule.blobDownloadUrl);
+    return;
+  }
+
+  const localFileName = schedule?.localFileName ?? schedule?.storedFileName;
+
+  if (!localFileName) {
     response.status(404).json({ message: "No file available for download." });
     return;
   }
 
-  response.redirect(schedule.blobDownloadUrl);
+  const safeFileName = path.basename(localFileName);
+  const absolutePath = path.join(uploadsDir, safeFileName);
+
+  if (!existsSync(absolutePath)) {
+    response.status(404).json({ message: "The uploaded file could not be found on disk." });
+    return;
+  }
+
+  response.download(absolutePath, schedule.sourceFileName ?? safeFileName);
 });
 
 app.post("/api/admin/upload/:type", requireAdmin, upload.single("file"), async (request, response) => {
@@ -283,13 +353,24 @@ app.post("/api/admin/upload/:type", requireAdmin, upload.single("file"), async (
     return;
   }
 
+  const validatedUpload = validateScheduleUpload(request.body ?? {});
+
+  if ("error" in validatedUpload) {
+    response.status(400).json({ message: validatedUpload.error });
+    return;
+  }
+
   let parsedSchedule = null;
 
   try {
     parsedSchedule = parseScheduleWorkbook(
       request.file.buffer,
       scheduleType,
-      request.file.originalname
+      request.file.originalname,
+      {
+        startDate: validatedUpload.startDate,
+        endDate: validatedUpload.endDate
+      }
     );
   } catch (error) {
     if (error instanceof Error) {
@@ -300,22 +381,37 @@ app.post("/api/admin/upload/:type", requireAdmin, upload.single("file"), async (
   }
 
   let uploadedBlob = null;
+  let localUpload = null;
 
   try {
-    uploadedBlob = await put(buildBlobPath(scheduleType, request.file.originalname), request.file.buffer, {
-      access: "public",
-      contentType: request.file.mimetype || undefined
-    });
+    const storageDetails = HAS_BLOB_STORAGE
+      ? await put(buildBlobPath(scheduleType, request.file.originalname), request.file.buffer, {
+          access: "public",
+          contentType: request.file.mimetype || undefined
+        })
+      : await saveFileLocally(request.file.buffer, request.file.originalname);
 
-    const { schedule, previousBlobPathname } = await saveSchedule({
+    if (HAS_BLOB_STORAGE) {
+      uploadedBlob = storageDetails;
+    } else {
+      localUpload = storageDetails;
+    }
+
+    const { schedule, previousBlobPathname, previousLocalFileName } = await saveSchedule({
       ...parsedSchedule,
-      blobPathname: uploadedBlob.pathname,
-      blobUrl: uploadedBlob.url,
-      blobDownloadUrl: uploadedBlob.downloadUrl
+      blobPathname: uploadedBlob?.pathname ?? null,
+      blobUrl: uploadedBlob?.url ?? null,
+      blobDownloadUrl: uploadedBlob?.downloadUrl ?? null,
+      localFileName: localUpload?.fileName ?? null,
+      storedFileName: localUpload?.fileName ?? null
     });
 
-    if (previousBlobPathname && previousBlobPathname !== uploadedBlob.pathname) {
+    if (previousBlobPathname && previousBlobPathname !== uploadedBlob?.pathname) {
       await deleteBlobIfPresent(previousBlobPathname);
+    }
+
+    if (previousLocalFileName && previousLocalFileName !== localUpload?.fileName) {
+      await deleteLocalFileIfPresent(previousLocalFileName);
     }
 
     response.json({
@@ -325,6 +421,10 @@ app.post("/api/admin/upload/:type", requireAdmin, upload.single("file"), async (
   } catch (error) {
     if (uploadedBlob?.pathname) {
       await deleteBlobIfPresent(uploadedBlob.pathname);
+    }
+
+    if (localUpload?.fileName) {
+      await deleteLocalFileIfPresent(localUpload.fileName);
     }
 
     throw error;

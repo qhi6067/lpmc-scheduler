@@ -1,9 +1,20 @@
 import "dotenv/config";
+import crypto from "node:crypto";
+import { existsSync } from "node:fs";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { neon } from "@neondatabase/serverless";
 
 const EMPTY_SCHEDULES = {
   techs: null,
   pharmacists: null
+};
+
+const DEFAULT_LOCAL_STATE = {
+  schedules: { ...EMPTY_SCHEDULES },
+  ptoRequests: [],
+  adminPasswordHash: null
 };
 
 const DATABASE_URL =
@@ -12,12 +23,25 @@ const DATABASE_URL =
   process.env.POSTGRES_URL_NON_POOLING ??
   "";
 
+export const STORE_MODE = DATABASE_URL ? "postgres" : "local";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const dataDir = path.join(__dirname, "data");
+const stateFilePath = path.join(dataDir, "state.json");
+
 let sqlClient = null;
 let initializationPromise = null;
 
+function createPasswordHash(password) {
+  const salt = crypto.randomBytes(16).toString("hex");
+  const hash = crypto.scryptSync(password, salt, 64).toString("hex");
+  return `${salt}:${hash}`;
+}
+
 function getSql() {
   if (!DATABASE_URL) {
-    throw new Error("Database not configured. Set DATABASE_URL or POSTGRES_URL.");
+    return null;
   }
 
   if (!sqlClient) {
@@ -96,7 +120,35 @@ function mapScheduleRow(row) {
     uploadedAt: toIsoTimestamp(row.uploaded_at),
     blobPathname: row.blob_pathname,
     blobUrl: row.blob_url,
-    blobDownloadUrl: row.blob_download_url
+    blobDownloadUrl: row.blob_download_url,
+    localFileName: null,
+    storedFileName: null
+  };
+}
+
+function mapLocalSchedule(schedule) {
+  if (!schedule) {
+    return null;
+  }
+
+  const localFileName = schedule.localFileName ?? schedule.storedFileName ?? null;
+
+  return {
+    scheduleType: schedule.scheduleType,
+    title: schedule.title,
+    facility: schedule.facility,
+    rangeLabel: schedule.rangeLabel,
+    startDate: toIsoDate(schedule.startDate),
+    endDate: toIsoDate(schedule.endDate),
+    columns: Array.isArray(schedule.columns) ? schedule.columns : [],
+    employees: Array.isArray(schedule.employees) ? schedule.employees : [],
+    sourceFileName: schedule.sourceFileName ?? localFileName,
+    uploadedAt: toIsoTimestamp(schedule.uploadedAt),
+    blobPathname: schedule.blobPathname ?? null,
+    blobUrl: schedule.blobUrl ?? null,
+    blobDownloadUrl: schedule.blobDownloadUrl ?? null,
+    localFileName,
+    storedFileName: schedule.storedFileName ?? localFileName
   };
 }
 
@@ -118,7 +170,86 @@ function mapPtoRow(row) {
   };
 }
 
+function mapLocalPtoRequest(request) {
+  if (!request) {
+    return null;
+  }
+
+  return {
+    id: request.id,
+    employeeName: request.employeeName,
+    scheduleType: request.scheduleType,
+    startDate: toIsoDate(request.startDate),
+    endDate: toIsoDate(request.endDate),
+    reason: request.reason ?? "",
+    status: request.status,
+    submittedAt: toIsoTimestamp(request.submittedAt),
+    reviewedAt: toIsoTimestamp(request.reviewedAt)
+  };
+}
+
+function normalizeLocalState(parsed = {}) {
+  return {
+    schedules: {
+      ...EMPTY_SCHEDULES,
+      ...(parsed.schedules && typeof parsed.schedules === "object" ? parsed.schedules : {})
+    },
+    ptoRequests: Array.isArray(parsed.ptoRequests) ? parsed.ptoRequests : [],
+    adminPasswordHash:
+      typeof parsed.adminPasswordHash === "string" ? parsed.adminPasswordHash : null,
+    adminPassword: typeof parsed.adminPassword === "string" ? parsed.adminPassword : null
+  };
+}
+
+async function writeLocalState(state) {
+  const nextState = {
+    schedules: {
+      ...EMPTY_SCHEDULES,
+      ...(state.schedules ?? {})
+    },
+    ptoRequests: Array.isArray(state.ptoRequests) ? state.ptoRequests : [],
+    adminPasswordHash: state.adminPasswordHash ?? null
+  };
+
+  await mkdir(dataDir, { recursive: true });
+  await writeFile(stateFilePath, `${JSON.stringify(nextState, null, 2)}\n`, "utf8");
+}
+
+async function ensureLocalStateFile() {
+  await mkdir(dataDir, { recursive: true });
+
+  if (!existsSync(stateFilePath)) {
+    await writeLocalState(DEFAULT_LOCAL_STATE);
+  }
+}
+
+async function readLocalState() {
+  await ensureLocalStateFile();
+  const raw = await readFile(stateFilePath, "utf8");
+
+  let parsed = {};
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    parsed = DEFAULT_LOCAL_STATE;
+  }
+
+  const normalized = normalizeLocalState(parsed);
+
+  if (!normalized.adminPasswordHash && normalized.adminPassword) {
+    normalized.adminPasswordHash = createPasswordHash(normalized.adminPassword);
+    await writeLocalState(normalized);
+  }
+
+  return normalized;
+}
+
 async function ensureSchema() {
+  if (STORE_MODE === "local") {
+    await ensureLocalStateFile();
+    return;
+  }
+
   const sql = getSql();
 
   await sql`
@@ -183,6 +314,15 @@ export async function initializeStore() {
 
 export async function getSchedules() {
   await initializeStore();
+
+  if (STORE_MODE === "local") {
+    const state = await readLocalState();
+    return {
+      techs: mapLocalSchedule(state.schedules.techs),
+      pharmacists: mapLocalSchedule(state.schedules.pharmacists)
+    };
+  }
+
   const sql = getSql();
   const rows = await sql`SELECT * FROM schedules`;
   const schedules = { ...EMPTY_SCHEDULES };
@@ -200,6 +340,12 @@ export async function getSchedules() {
 
 export async function getSchedule(scheduleType) {
   await initializeStore();
+
+  if (STORE_MODE === "local") {
+    const state = await readLocalState();
+    return mapLocalSchedule(state.schedules[scheduleType] ?? null);
+  }
+
   const sql = getSql();
   const rows = await sql`
     SELECT * FROM schedules
@@ -212,6 +358,31 @@ export async function getSchedule(scheduleType) {
 
 export async function saveSchedule(schedule) {
   await initializeStore();
+
+  if (STORE_MODE === "local") {
+    const state = await readLocalState();
+    const previousSchedule = state.schedules[schedule.scheduleType] ?? null;
+    const nextSchedule = {
+      ...schedule,
+      uploadedAt: new Date().toISOString(),
+      blobPathname: schedule.blobPathname ?? null,
+      blobUrl: schedule.blobUrl ?? null,
+      blobDownloadUrl: schedule.blobDownloadUrl ?? null,
+      localFileName: schedule.localFileName ?? schedule.storedFileName ?? null,
+      storedFileName: schedule.storedFileName ?? schedule.localFileName ?? null
+    };
+
+    state.schedules[schedule.scheduleType] = nextSchedule;
+    await writeLocalState(state);
+
+    return {
+      schedule: mapLocalSchedule(nextSchedule),
+      previousBlobPathname: previousSchedule?.blobPathname ?? null,
+      previousLocalFileName:
+        previousSchedule?.localFileName ?? previousSchedule?.storedFileName ?? null
+    };
+  }
+
   const sql = getSql();
   const existingRows = await sql`
     SELECT blob_pathname
@@ -269,12 +440,21 @@ export async function saveSchedule(schedule) {
 
   return {
     schedule: mapScheduleRow(rows[0] ?? null),
-    previousBlobPathname: existingRows[0]?.blob_pathname ?? null
+    previousBlobPathname: existingRows[0]?.blob_pathname ?? null,
+    previousLocalFileName: null
   };
 }
 
 export async function listPtoRequests() {
   await initializeStore();
+
+  if (STORE_MODE === "local") {
+    const state = await readLocalState();
+    return state.ptoRequests
+      .map(mapLocalPtoRequest)
+      .sort((left, right) => (right?.submittedAt ?? "").localeCompare(left?.submittedAt ?? ""));
+  }
+
   const sql = getSql();
   const rows = await sql`
     SELECT * FROM pto_requests
@@ -286,6 +466,19 @@ export async function listPtoRequests() {
 
 export async function createPtoRequest(request) {
   await initializeStore();
+
+  if (STORE_MODE === "local") {
+    const state = await readLocalState();
+    const nextRequest = {
+      ...request,
+      reviewedAt: request.reviewedAt ?? null
+    };
+
+    state.ptoRequests = [nextRequest, ...state.ptoRequests];
+    await writeLocalState(state);
+    return mapLocalPtoRequest(nextRequest);
+  }
+
   const sql = getSql();
   const rows = await sql`
     INSERT INTO pto_requests (
@@ -318,6 +511,26 @@ export async function createPtoRequest(request) {
 
 export async function updatePtoRequestStatus(id, status) {
   await initializeStore();
+
+  if (STORE_MODE === "local") {
+    const state = await readLocalState();
+    const requestIndex = state.ptoRequests.findIndex((request) => request.id === id);
+
+    if (requestIndex === -1) {
+      return null;
+    }
+
+    const updatedRequest = {
+      ...state.ptoRequests[requestIndex],
+      status,
+      reviewedAt: new Date().toISOString()
+    };
+
+    state.ptoRequests[requestIndex] = updatedRequest;
+    await writeLocalState(state);
+    return mapLocalPtoRequest(updatedRequest);
+  }
+
   const sql = getSql();
   const rows = await sql`
     UPDATE pto_requests
@@ -333,6 +546,12 @@ export async function updatePtoRequestStatus(id, status) {
 
 export async function getAdminPasswordHash() {
   await initializeStore();
+
+  if (STORE_MODE === "local") {
+    const state = await readLocalState();
+    return state.adminPasswordHash ?? null;
+  }
+
   const sql = getSql();
   const rows = await sql`
     SELECT value
@@ -346,6 +565,14 @@ export async function getAdminPasswordHash() {
 
 export async function setAdminPasswordHash(passwordHash) {
   await initializeStore();
+
+  if (STORE_MODE === "local") {
+    const state = await readLocalState();
+    state.adminPasswordHash = passwordHash;
+    await writeLocalState(state);
+    return;
+  }
+
   const sql = getSql();
 
   await sql`

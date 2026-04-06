@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 const SCHEDULE_OPTIONS = [
   { key: "techs", label: "Techs" },
@@ -208,35 +208,113 @@ function ThemePicker({ theme, onChange }) {
   );
 }
 
-// ─── Alert Banner ────────────────────────────────────────────────────────────
+// ─── Bell Icon ───────────────────────────────────────────────────────────────
 
-function AlertBanner({ tone, message, onDismiss, actionLabel, onAction, actionDisabled = false }) {
-  if (!message) return null;
+function BellIcon() {
   return (
-    <div className={`banner banner-${tone}`} role="alert">
-      <span className="banner-text">{message}</span>
-      <div className="banner-actions">
-        {actionLabel && onAction && (
-          <button
-            type="button"
-            className="banner-action"
-            onClick={onAction}
-            disabled={actionDisabled}
-          >
-            {actionLabel}
-          </button>
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+      <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+    </svg>
+  );
+}
+
+// ─── Notification Bell ───────────────────────────────────────────────────────
+
+function NotificationBell({ notifications, onDismiss, onDismissAll }) {
+  const [open, setOpen] = useState(false);
+  const wrapperRef = useRef(null);
+  const count = notifications.length;
+
+  useEffect(() => {
+    if (!open) return undefined;
+    function handleOutsideClick(e) {
+      if (!wrapperRef.current?.contains(e.target)) setOpen(false);
+    }
+    document.addEventListener("mousedown", handleOutsideClick);
+    return () => document.removeEventListener("mousedown", handleOutsideClick);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    function handleKey(e) {
+      if (e.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("keydown", handleKey);
+    return () => document.removeEventListener("keydown", handleKey);
+  }, [open]);
+
+  return (
+    <div className="notif-bell-wrapper" ref={wrapperRef}>
+      <button
+        type="button"
+        className={`notif-bell-button ${count > 0 ? "has-notifs" : ""}`}
+        onClick={() => setOpen((v) => !v)}
+        aria-label={count > 0 ? `${count} notification${count !== 1 ? "s" : ""}` : "Notifications"}
+        aria-expanded={open}
+        aria-haspopup="true"
+      >
+        <BellIcon />
+        {count > 0 && (
+          <span className="notif-badge" aria-hidden="true">
+            {count > 9 ? "9+" : count}
+          </span>
         )}
-        <button type="button" className="banner-dismiss" onClick={onDismiss} aria-label="Dismiss">
-          ✕
-        </button>
-      </div>
+      </button>
+
+      {open && (
+        <div className="notif-dropdown" role="menu" aria-label="Notifications">
+          <div className="notif-dropdown-header">
+            <span className="notif-dropdown-title">Notifications</span>
+            {count > 0 && (
+              <button
+                type="button"
+                className="notif-clear-all"
+                onClick={() => { onDismissAll(); setOpen(false); }}
+              >
+                Clear all
+              </button>
+            )}
+          </div>
+          {count === 0 ? (
+            <p className="notif-empty">No new notifications</p>
+          ) : (
+            <div className="notif-list">
+              {notifications.map((n) => (
+                <div key={n.id} className={`notif-item notif-${n.tone}`}>
+                  <span className="notif-message">{n.message}</span>
+                  <div className="notif-item-actions">
+                    {n.action && (
+                      <button
+                        type="button"
+                        className="notif-action-btn"
+                        onClick={() => { n.action.callback(); onDismiss(n.id); setOpen(false); }}
+                      >
+                        {n.action.label}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="notif-dismiss-btn"
+                      onClick={() => onDismiss(n.id)}
+                      aria-label="Dismiss notification"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
 // ─── Top Nav ─────────────────────────────────────────────────────────────────
 
-function TopNav({ activeSchedule, isAdmin, isSystemUser, onScheduleChange, onOpenPtoForm, onOpenAdmin, theme, onThemeChange }) {
+function TopNav({ activeSchedule, isAdmin, isSystemUser, onScheduleChange, onOpenPtoForm, onOpenAdmin, theme, onThemeChange, notifications, onDismissNotification, onDismissAllNotifications }) {
   return (
     <header className="top-nav">
       <div className="nav-brand">
@@ -265,6 +343,11 @@ function TopNav({ activeSchedule, isAdmin, isSystemUser, onScheduleChange, onOpe
         <button type="button" className="ghost-button" onClick={onOpenPtoForm}>
           Request PTO
         </button>
+        <NotificationBell
+          notifications={notifications}
+          onDismiss={onDismissNotification}
+          onDismissAll={onDismissAllNotifications}
+        />
         <button type="button" className="primary-button" onClick={onOpenAdmin}>
           {isAdmin || isSystemUser ? "Dashboard" : "Admin"}
         </button>
@@ -1423,9 +1506,8 @@ export default function App() {
   const [ptoModalOpen, setPtoModalOpen] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [isSystemUser, setIsSystemUser] = useState(false);
-  const [pageMessage, setPageMessage] = useState("");
+  const [notifications, setNotifications] = useState([]);
   const [undoPtoClear, setUndoPtoClear] = useState(null);
-  const [pageError, setPageError] = useState("");
   const [search, setSearch] = useState("");
   const [showOnlyAssigned, setShowOnlyAssigned] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -1478,13 +1560,12 @@ export default function App() {
       const payload = await apiRequest("/api/admin/pto-requests");
       setPtoRequests(payload.requests);
     } catch (error) {
-      setPageError(error.message);
+      notify("error", error.message);
     }
   }
 
   async function loadPage() {
     setLoading(true);
-    setPageError("");
     try {
       const [schedulePayload, sessionPayload] = await Promise.all([
         apiRequest("/api/schedules"),
@@ -1506,7 +1587,7 @@ export default function App() {
         setPtoRequests([]);
       }
     } catch (error) {
-      setPageError(error.message);
+      notify("error", error.message);
     } finally {
       setLoading(false);
     }
@@ -1593,13 +1674,31 @@ export default function App() {
         return next;
       });
     } catch (error) {
-      setPageError(error.message);
+      notify("error", error.message);
     }
   }
 
   function resetFilters() {
     setSearch("");
     setShowOnlyAssigned(false);
+  }
+
+  function notify(tone, message, action) {
+    const id = `${Date.now()}-${Math.random()}`;
+    setNotifications((prev) => [{ id, tone, message, action: action ?? null }, ...prev.slice(0, 19)]);
+    if (tone === "success" && !action) {
+      setTimeout(() => setNotifications((prev) => prev.filter((n) => n.id !== id)), 8000);
+    }
+  }
+
+  function dismissNotification(id) {
+    setNotifications((prev) => prev.filter((n) => n.id !== id));
+    setUndoPtoClear(null);
+  }
+
+  function dismissAllNotifications() {
+    setNotifications([]);
+    setUndoPtoClear(null);
   }
 
   function openPtoModal() {
@@ -1610,7 +1709,6 @@ export default function App() {
   async function handleLoginSubmit(event) {
     event.preventDefault();
     setAuthLoading(true);
-    setPageError("");
     try {
       const result = await apiRequest("/api/auth/login", { method: "POST", body: JSON.stringify(loginForm) });
       setLoginForm({ username: "", password: "" });
@@ -1618,16 +1716,16 @@ export default function App() {
         setIsSystemUser(true);
         setIsAdmin(false);
         setUndoPtoClear(null);
-        setPageMessage("System access granted. You may reset the admin password.");
+        notify("success", "System access granted. You may reset the admin password.");
       } else {
         setIsAdmin(true);
         setIsSystemUser(false);
         await loadAdminPtoRequests();
         setUndoPtoClear(null);
-        setPageMessage("Admin access granted.");
+        notify("success", "Admin access granted.");
       }
     } catch (error) {
-      setPageError(error.message);
+      notify("error", error.message);
     } finally {
       setAuthLoading(false);
     }
@@ -1648,14 +1746,13 @@ export default function App() {
     setIsSystemUser(false);
     setPtoRequests([]);
     setUndoPtoClear(null);
-    setPageMessage("Signed out of admin session.");
+    notify("success", "Signed out of admin session.");
   }
 
   async function handleUpload(scheduleType, file) {
     const selectedRange = uploadDates[scheduleType];
 
     setUploadState((c) => ({ ...c, [scheduleType]: true }));
-    setPageError("");
     try {
       const payload = new FormData();
       payload.append("file", file);
@@ -1686,9 +1783,9 @@ export default function App() {
       }));
       setActiveSchedule(scheduleType);
       setUndoPtoClear(null);
-      setPageMessage(response.message);
+      notify("success", response.message);
     } catch (error) {
-      setPageError(error.message);
+      notify("error", error.message);
     } finally {
       setUploadState((c) => ({ ...c, [scheduleType]: false }));
     }
@@ -1696,11 +1793,10 @@ export default function App() {
 
   async function handlePtoSubmit(event) {
     event.preventDefault();
-    setPageError("");
     setPtoSubmitting(true);
     const normalizedEnd = ptoForm.endDate || ptoForm.startDate;
     if (normalizedEnd < ptoForm.startDate) {
-      setPageError("The end date cannot be before the start date.");
+      notify("error", "The end date cannot be before the start date.");
       setPtoSubmitting(false);
       return;
     }
@@ -1713,9 +1809,9 @@ export default function App() {
       setPtoForm({ employeeName: "", scheduleType: activeSchedule, startDate: "", endDate: "", reason: "" });
       setPtoModalOpen(false);
       setUndoPtoClear(null);
-      setPageMessage("PTO request submitted for admin review.");
+      notify("success", "PTO request submitted for admin review.");
     } catch (error) {
-      setPageError(error.message);
+      notify("error", error.message);
     } finally {
       setPtoSubmitting(false);
     }
@@ -1723,7 +1819,6 @@ export default function App() {
 
   async function handleReview(requestId, status) {
     setReviewLoadingId(requestId);
-    setPageError("");
     setUndoPtoClear(null);
     try {
       const payload = await apiRequest(`/api/admin/pto-requests/${requestId}`, {
@@ -1731,10 +1826,10 @@ export default function App() {
         body: JSON.stringify({ status })
       });
       setPtoRequests(payload.requests);
-      setPageMessage(payload.message);
+      notify("success", payload.message);
       return true;
     } catch (error) {
-      setPageError(error.message);
+      notify("error", error.message);
       return false;
     } finally {
       setReviewLoadingId("");
@@ -1743,20 +1838,17 @@ export default function App() {
 
   async function handleClearRequest(requestId) {
     setClearLoadingId(requestId);
-    setPageError("");
     try {
       const payload = await apiRequest(`/api/admin/pto-requests/${requestId}`, {
         method: "DELETE"
       });
       setPtoRequests(payload.requests);
-      setPageMessage(payload.message);
-      setUndoPtoClear({
-        requests: payload.deletedRequests ?? [],
-        actionLabel: "Undo"
-      });
+      const undoData = { requests: payload.deletedRequests ?? [], actionLabel: "Undo" };
+      setUndoPtoClear(undoData);
+      notify("success", payload.message, undoData.requests.length ? { label: "Undo", callback: () => handleUndoPtoClear() } : null);
       return true;
     } catch (error) {
-      setPageError(error.message);
+      notify("error", error.message);
       return false;
     } finally {
       setClearLoadingId("");
@@ -1765,20 +1857,17 @@ export default function App() {
 
   async function handleClearReviewedRequests() {
     setClearingReviewed(true);
-    setPageError("");
     try {
       const payload = await apiRequest("/api/admin/pto-requests/reviewed", {
         method: "DELETE"
       });
       setPtoRequests(payload.requests);
-      setPageMessage(payload.message);
-      setUndoPtoClear({
-        requests: payload.deletedRequests ?? [],
-        actionLabel: "Undo"
-      });
+      const undoData = { requests: payload.deletedRequests ?? [], actionLabel: "Undo" };
+      setUndoPtoClear(undoData);
+      notify("success", payload.message, undoData.requests.length ? { label: "Undo", callback: () => handleUndoPtoClear() } : null);
       return true;
     } catch (error) {
-      setPageError(error.message);
+      notify("error", error.message);
       return false;
     } finally {
       setClearingReviewed(false);
@@ -1790,17 +1879,16 @@ export default function App() {
       return;
     }
 
-    setPageError("");
     try {
       const payload = await apiRequest("/api/admin/pto-requests/restore", {
         method: "POST",
         body: JSON.stringify({ requests: undoPtoClear.requests })
       });
       setPtoRequests(payload.requests);
-      setPageMessage(payload.message);
       setUndoPtoClear(null);
+      notify("success", payload.message);
     } catch (error) {
-      setPageError(error.message);
+      notify("error", error.message);
     }
   }
 
@@ -1818,20 +1906,12 @@ export default function App() {
         onOpenAdmin={() => setAdminOpen(true)}
         theme={theme}
         onThemeChange={setTheme}
+        notifications={notifications}
+        onDismissNotification={dismissNotification}
+        onDismissAllNotifications={dismissAllNotifications}
       />
 
       <main className="page" id="main-content">
-        <AlertBanner
-          tone="success"
-          message={pageMessage}
-          onDismiss={() => {
-            setPageMessage("");
-            setUndoPtoClear(null);
-          }}
-          actionLabel={undoPtoClear?.requests?.length ? undoPtoClear.actionLabel : ""}
-          onAction={undoPtoClear?.requests?.length ? handleUndoPtoClear : undefined}
-        />
-        <AlertBanner tone="error" message={pageError} onDismiss={() => setPageError("")} />
 
         {loading ? (
           <SkeletonLoader />

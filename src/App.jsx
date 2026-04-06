@@ -315,45 +315,115 @@ function NotificationBell({ notifications, onDismiss, onDismissAll }) {
 // ─── Top Nav ─────────────────────────────────────────────────────────────────
 
 function TopNav({ activeSchedule, isAdmin, isSystemUser, onScheduleChange, onOpenPtoForm, onOpenAdmin, theme, onThemeChange, notifications, onDismissNotification, onDismissAllNotifications }) {
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  function closeMenu() { setMobileMenuOpen(false); }
+
   return (
-    <header className="top-nav">
-      <div className="nav-brand">
-        <span className="nav-monogram" aria-hidden="true">LP</span>
-        <div className="nav-brand-text">
-          <h1 className="nav-title">Scheduler</h1>
-          <p className="nav-subtitle">Las Palmas Medical Center</p>
+    <>
+      <header className="top-nav">
+        <div className="nav-brand">
+          <span className="nav-monogram" aria-hidden="true">LP</span>
+          <div className="nav-brand-text">
+            <h1 className="nav-title">Scheduler</h1>
+            <p className="nav-subtitle">Las Palmas Medical Center</p>
+          </div>
         </div>
-      </div>
 
-      <nav className="nav-tabs desktop-tabs" aria-label="Schedule type">
-        {SCHEDULE_OPTIONS.map((option) => (
-          <button
-            key={option.key}
-            type="button"
-            className={`tab-button ${activeSchedule === option.key ? "is-active" : ""}`}
-            onClick={() => onScheduleChange(option.key)}
-            aria-pressed={activeSchedule === option.key}
-          >
-            {option.label}
+        <nav className="nav-tabs desktop-tabs" aria-label="Schedule type">
+          {SCHEDULE_OPTIONS.map((option) => (
+            <button
+              key={option.key}
+              type="button"
+              className={`tab-button ${activeSchedule === option.key ? "is-active" : ""}`}
+              onClick={() => onScheduleChange(option.key)}
+              aria-pressed={activeSchedule === option.key}
+            >
+              {option.label}
+            </button>
+          ))}
+        </nav>
+
+        <div className="nav-end">
+          <button type="button" className="ghost-button" onClick={onOpenPtoForm}>
+            Request PTO
           </button>
-        ))}
-      </nav>
+          <NotificationBell
+            notifications={notifications}
+            onDismiss={onDismissNotification}
+            onDismissAll={onDismissAllNotifications}
+          />
+          <button type="button" className="primary-button" onClick={onOpenAdmin}>
+            {isAdmin || isSystemUser ? "Dashboard" : "Admin"}
+          </button>
+          <ThemePicker theme={theme} onChange={onThemeChange} />
+        </div>
 
-      <div className="nav-end">
-        <button type="button" className="ghost-button" onClick={onOpenPtoForm}>
-          Request PTO
-        </button>
-        <NotificationBell
-          notifications={notifications}
-          onDismiss={onDismissNotification}
-          onDismissAll={onDismissAllNotifications}
-        />
-        <button type="button" className="primary-button" onClick={onOpenAdmin}>
-          {isAdmin || isSystemUser ? "Dashboard" : "Admin"}
-        </button>
-        <ThemePicker theme={theme} onChange={onThemeChange} />
-      </div>
-    </header>
+        {/* Mobile-only: bell + hamburger */}
+        <div className="nav-mobile-controls">
+          <NotificationBell
+            notifications={notifications}
+            onDismiss={onDismissNotification}
+            onDismissAll={onDismissAllNotifications}
+          />
+          <label className="hamburger" aria-label={mobileMenuOpen ? "Close menu" : "Open menu"}>
+            <input
+              type="checkbox"
+              checked={mobileMenuOpen}
+              onChange={(e) => setMobileMenuOpen(e.target.checked)}
+            />
+            <svg viewBox="0 0 32 32">
+              <path
+                className="line line-top-bottom"
+                d="M27 10 13 10C10.8 10 9 8.2 9 6 9 3.5 10.8 2 13 2 15.2 2 17 3.8 17 6L17 26C17 28.2 18.8 30 21 30 23.2 30 25 28.2 25 26 25 23.8 23.2 22 21 22L7 22"
+              />
+              <path className="line" d="M7 16 27 16" />
+            </svg>
+          </label>
+        </div>
+      </header>
+
+      {/* Mobile dropdown menu — rendered below the sticky header */}
+      {mobileMenuOpen && (
+        <div className="nav-mobile-menu" role="dialog" aria-label="Navigation menu">
+          <nav className="mobile-menu-tabs" aria-label="Schedule type">
+            {SCHEDULE_OPTIONS.map((option) => (
+              <button
+                key={option.key}
+                type="button"
+                className={`mobile-menu-tab ${activeSchedule === option.key ? "is-active" : ""}`}
+                onClick={() => { onScheduleChange(option.key); closeMenu(); }}
+                aria-pressed={activeSchedule === option.key}
+              >
+                {option.label}
+              </button>
+            ))}
+          </nav>
+
+          <div className="mobile-menu-actions">
+            <button
+              type="button"
+              className="mobile-menu-btn"
+              onClick={() => { onOpenPtoForm(); closeMenu(); }}
+            >
+              Request PTO
+            </button>
+            <button
+              type="button"
+              className="mobile-menu-btn mobile-menu-btn-primary"
+              onClick={() => { onOpenAdmin(); closeMenu(); }}
+            >
+              {isAdmin || isSystemUser ? "Dashboard" : "Admin"}
+            </button>
+          </div>
+
+          <div className="mobile-menu-theme">
+            <span className="mobile-menu-theme-label">Theme</span>
+            <ThemePicker theme={theme} onChange={onThemeChange} />
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 

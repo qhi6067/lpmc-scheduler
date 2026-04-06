@@ -24,9 +24,22 @@ const STATUS_STYLES = {
   pending: "pending"
 };
 
+function parseDisplayDate(value) {
+  if (typeof value === "string") {
+    const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+
+    if (match) {
+      const [, year, month, day] = match;
+      return new Date(Number(year), Number(month) - 1, Number(day));
+    }
+  }
+
+  return new Date(value);
+}
+
 function formatDate(value, options = {}) {
   if (!value) return "—";
-  const parsed = new Date(value);
+  const parsed = parseDisplayDate(value);
   if (Number.isNaN(parsed.getTime())) return value;
   return new Intl.DateTimeFormat("en-US", {
     month: "short",
@@ -57,6 +70,23 @@ function getAssignmentTone(assignment) {
 
 function getScheduleTypeLabel(scheduleType) {
   return scheduleType === "pharmacists" ? "Pharmacist" : "Tech";
+}
+
+function isAttachmentOnlySchedule(schedule) {
+  return Boolean(schedule) && schedule.parseStatus === "attachment_only";
+}
+
+function getExcelColumnLabel(index) {
+  let label = "";
+  let current = index + 1;
+
+  while (current > 0) {
+    const remainder = (current - 1) % 26;
+    label = String.fromCharCode(65 + remainder) + label;
+    current = Math.floor((current - 1) / 26);
+  }
+
+  return label;
 }
 
 function createUploadRangeState(schedules = {}) {
@@ -130,9 +160,22 @@ function ModalFrame({ open, title, onClose, children, wide = false }) {
   if (!open) return null;
 
   return (
-    <div className="modal-shell" role="dialog" aria-modal="true" aria-label={title}>
-      <div className="modal-backdrop" onClick={onClose} />
-      <div className={`modal-card ${wide ? "modal-card-wide" : ""}`}>
+    <div
+      className="modal-shell"
+      role="dialog"
+      aria-modal="true"
+      aria-label={title}
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) {
+          onClose();
+        }
+      }}
+    >
+      <div className="modal-backdrop" aria-hidden="true" onMouseDown={onClose} />
+      <div
+        className={`modal-card ${wide ? "modal-card-wide" : ""}`}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
         <div className="modal-topbar">
           <p className="eyebrow">{title}</p>
           <button type="button" className="close-button" onClick={onClose} aria-label="Close dialog">
@@ -167,14 +210,26 @@ function ThemePicker({ theme, onChange }) {
 
 // ─── Alert Banner ────────────────────────────────────────────────────────────
 
-function AlertBanner({ tone, message, onDismiss }) {
+function AlertBanner({ tone, message, onDismiss, actionLabel, onAction, actionDisabled = false }) {
   if (!message) return null;
   return (
     <div className={`banner banner-${tone}`} role="alert">
       <span className="banner-text">{message}</span>
-      <button type="button" className="banner-dismiss" onClick={onDismiss} aria-label="Dismiss">
-        ✕
-      </button>
+      <div className="banner-actions">
+        {actionLabel && onAction && (
+          <button
+            type="button"
+            className="banner-action"
+            onClick={onAction}
+            disabled={actionDisabled}
+          >
+            {actionLabel}
+          </button>
+        )}
+        <button type="button" className="banner-dismiss" onClick={onDismiss} aria-label="Dismiss">
+          ✕
+        </button>
+      </div>
     </div>
   );
 }
@@ -243,6 +298,7 @@ function MobileTabBar({ activeSchedule, onScheduleChange }) {
 
 function HeroPanel({ schedule, activeSchedule, onOpenPtoForm }) {
   const typeLabel = activeSchedule === "pharmacists" ? "Pharmacist" : "Tech";
+  const attachmentOnly = isAttachmentOnlySchedule(schedule);
 
   if (!schedule) {
     return (
@@ -266,6 +322,11 @@ function HeroPanel({ schedule, activeSchedule, onOpenPtoForm }) {
           <p className="eyebrow">{schedule.facility}</p>
           <h2 className="hero-title">{schedule.rangeLabel}</h2>
           <p className="hero-type-label">{schedule.title}</p>
+          {attachmentOnly && (
+            <p className="helper-text hero-note">
+              {schedule.parseMessage || "This file is available as an Excel attachment because it could not be rendered as a schedule grid."}
+            </p>
+          )}
         </div>
         <div className="hero-actions">
           <a className="primary-button" href={schedule.downloadUrl} download>
@@ -291,12 +352,12 @@ function HeroPanel({ schedule, activeSchedule, onOpenPtoForm }) {
           <strong>{formatDate(schedule.endDate)}</strong>
         </div>
         <div className="hero-stat">
-          <span>Staff listed</span>
-          <strong>{schedule.employees.length}</strong>
+          <span>{attachmentOnly ? "Display mode" : "Staff listed"}</span>
+          <strong>{attachmentOnly ? "Attachment only" : schedule.employees.length}</strong>
         </div>
         <div className="hero-stat">
-          <span>Days posted</span>
-          <strong>{schedule.columns.length}</strong>
+          <span>{attachmentOnly ? "Schedule view" : "Days posted"}</span>
+          <strong>{attachmentOnly ? "Excel file" : schedule.columns.length}</strong>
         </div>
       </div>
     </section>
@@ -306,7 +367,7 @@ function HeroPanel({ schedule, activeSchedule, onOpenPtoForm }) {
 // ─── Schedule Filters ────────────────────────────────────────────────────────
 
 function ScheduleFilters({ search, onSearch, showOnlyAssigned, onToggleAssigned, schedule, visibleCount, totalCount, onClearFilters, hasActiveFilters }) {
-  if (!schedule) return null;
+  if (!schedule || isAttachmentOnlySchedule(schedule)) return null;
 
   return (
     <section className="filter-bar">
@@ -353,8 +414,203 @@ function ScheduleFilters({ search, onSearch, showOnlyAssigned, onToggleAssigned,
 
 // ─── Schedule Table ──────────────────────────────────────────────────────────
 
+function AttachmentPreview({ schedule }) {
+  const [preview, setPreview] = useState({ loading: true, error: "", workbook: null });
+  const [activeSheetIndex, setActiveSheetIndex] = useState(0);
+  const [search, setSearch] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadPreview() {
+      setPreview({ loading: true, error: "", workbook: null });
+      setActiveSheetIndex(0);
+
+      try {
+        const payload = await apiRequest(schedule.previewUrl);
+
+        if (!cancelled) {
+          setPreview({ loading: false, error: "", workbook: payload.preview });
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setPreview({
+            loading: false,
+            error: error.message || "Could not load workbook preview.",
+            workbook: null
+          });
+        }
+      }
+    }
+
+    loadPreview();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [schedule.previewUrl, schedule.uploadedAt]);
+
+  const workbook = preview.workbook;
+  const sheets = workbook?.sheets ?? [];
+  const activeSheet = sheets[activeSheetIndex] ?? sheets[0] ?? null;
+  const normalizedSearch = search.trim().toLowerCase();
+  const baseRows = activeSheet?.rows ?? [];
+  const headerRow = baseRows[0] ?? [];
+  const bodyRows = baseRows.slice(1);
+  const indexedBodyRows = bodyRows.map((row, index) => ({
+    row,
+    sourceRowIndex: index + 1
+  }));
+  const matchingBodyRows = normalizedSearch
+    ? indexedBodyRows.filter(({ row }) =>
+        row.some((value) => String(value ?? "").toLowerCase().includes(normalizedSearch))
+      )
+    : indexedBodyRows;
+  const visibleRows = headerRow.length > 0
+    ? [{ row: headerRow, sourceRowIndex: 0 }, ...matchingBodyRows]
+    : matchingBodyRows;
+  const hasSearch = normalizedSearch.length > 0;
+  const visibleMatchCount = matchingBodyRows.length;
+  const hasFilteredResults = visibleRows.length > 0;
+
+  return (
+    <section className="panel excel-preview-panel">
+      <div className="attachment-preview-header">
+        <div>
+          <p className="eyebrow">Attachment Posted</p>
+          <h2>Excel attachment preview</h2>
+          <p className="muted-text">
+            {schedule.parseMessage || "The uploaded workbook is shown below because the schedule grid could not be rendered automatically."}
+          </p>
+        </div>
+        <a className="ghost-button" href={schedule.downloadUrl} download>
+          Download Excel
+        </a>
+      </div>
+
+      {preview.loading && (
+        <div className="excel-preview-empty">
+          <p className="helper-text">Loading workbook preview...</p>
+        </div>
+      )}
+
+      {!preview.loading && preview.error && (
+        <div className="excel-preview-empty">
+          <p className="muted-text">{preview.error}</p>
+        </div>
+      )}
+
+      {!preview.loading && !preview.error && activeSheet && (
+        <>
+          {sheets.length > 1 && (
+            <div className="excel-sheet-tabs" role="tablist" aria-label="Workbook sheets">
+              {sheets.map((sheet, index) => (
+                <button
+                  key={sheet.name}
+                  type="button"
+                  role="tab"
+                  className={`excel-sheet-tab ${index === activeSheetIndex ? "is-active" : ""}`}
+                  onClick={() => setActiveSheetIndex(index)}
+                  aria-selected={index === activeSheetIndex}
+                >
+                  {sheet.name}
+                </button>
+              ))}
+            </div>
+          )}
+
+          <div className="excel-preview-toolbar">
+            <label className="filter-search-field excel-preview-search">
+              <span className="sr-only">Search workbook preview</span>
+              <input
+                type="search"
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="Search names, shifts, or notes in this sheet"
+                aria-label="Search workbook preview"
+              />
+            </label>
+            <div className="excel-preview-summary">
+              <span>
+                {hasSearch
+                  ? `${visibleMatchCount} matching row${visibleMatchCount === 1 ? "" : "s"}`
+                  : `${Math.max(bodyRows.length, 0)} data row${bodyRows.length === 1 ? "" : "s"}`}
+              </span>
+              {hasSearch && (
+                <button type="button" className="ghost-button excel-preview-clear" onClick={() => setSearch("")}>
+                  Clear
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="excel-preview-meta">
+            <span>{activeSheet.name}</span>
+            <span>{activeSheet.totalRows || 0} rows</span>
+            <span>{activeSheet.totalColumns || 0} columns</span>
+          </div>
+
+          {hasFilteredResults ? (
+            <div className="excel-preview-scroll">
+              <table className="excel-preview-table">
+                <thead>
+                  <tr>
+                    <th className="excel-corner" />
+                    {(visibleRows[0]?.row ?? []).map((_, index) => (
+                      <th key={getExcelColumnLabel(index)}>{getExcelColumnLabel(index)}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {visibleRows.map(({ row, sourceRowIndex }, rowIndex) => {
+                    return (
+                      <tr key={`${activeSheet.name}-${sourceRowIndex + 1}-${rowIndex + 1}`}>
+                        <th>{sourceRowIndex + 1}</th>
+                      {row.map((value, columnIndex) => (
+                        <td
+                          key={`${activeSheet.name}-${sourceRowIndex + 1}-${columnIndex + 1}`}
+                          className={
+                            hasSearch && String(value ?? "").toLowerCase().includes(normalizedSearch)
+                              ? "excel-match-cell"
+                              : ""
+                          }
+                        >
+                          {value || "\u00A0"}
+                        </td>
+                      ))}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ) : hasSearch ? (
+            <div className="excel-preview-empty">
+              <p className="helper-text">No rows in this sheet match "{search.trim()}".</p>
+            </div>
+          ) : (
+            <div className="excel-preview-empty">
+              <p className="helper-text">This workbook does not contain visible cell data to preview.</p>
+            </div>
+          )}
+
+          {(activeSheet.truncatedRows || activeSheet.truncatedColumns || workbook?.truncatedSheets) && (
+            <p className="helper-text excel-preview-note">
+              Preview trimmed for readability. Download the Excel file to see the full workbook.
+            </p>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
 function ScheduleTable({ schedule, employees, showOnlyAssigned, search, hasActiveFilters, onClearFilters }) {
   if (!schedule) return null;
+
+  if (isAttachmentOnlySchedule(schedule)) {
+    return <AttachmentPreview schedule={schedule} />;
+  }
 
   if (employees.length === 0) {
     return (
@@ -516,11 +772,29 @@ const PTO_TYPE_FILTERS = [
   { key: "pharmacists", label: "Pharmacists" }
 ];
 
-function PtoLog({ requests, onReview, reviewLoadingId }) {
+const PTO_LOG_MONTHS = [
+  { key: "all", label: "All months" },
+  { key: "1", label: "January" },
+  { key: "2", label: "February" },
+  { key: "3", label: "March" },
+  { key: "4", label: "April" },
+  { key: "5", label: "May" },
+  { key: "6", label: "June" },
+  { key: "7", label: "July" },
+  { key: "8", label: "August" },
+  { key: "9", label: "September" },
+  { key: "10", label: "October" },
+  { key: "11", label: "November" },
+  { key: "12", label: "December" }
+];
+
+function PtoLog({ requests, onReview, reviewLoadingId, onClearRequest, clearLoadingId, onClearReviewed, clearingReviewed }) {
   const [expandedId, setExpandedId] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [typeFilter, setTypeFilter] = useState("all");
   const [search, setSearch] = useState("");
+  const [logMonth, setLogMonth] = useState("all");
+  const [logYear, setLogYear] = useState("all");
 
   const counts = useMemo(() =>
     requests.reduce(
@@ -545,6 +819,31 @@ function PtoLog({ requests, onReview, reviewLoadingId }) {
   }, [requests, statusFilter, typeFilter, search]);
 
   const hasFilters = statusFilter !== "all" || typeFilter !== "all" || search.trim().length > 0;
+  const reviewedCount = counts.approved + counts.denied;
+  const availableLogYears = useMemo(() => {
+    const currentYear = new Date().getFullYear();
+    const years = new Set([currentYear]);
+
+    for (let offset = 1; offset <= 6; offset += 1) {
+      years.add(currentYear - offset);
+      years.add(currentYear + offset);
+    }
+
+    return ["all", ...[...years].sort((left, right) => right - left).map(String)];
+  }, []);
+  const logSearchParams = new URLSearchParams();
+
+  if (logMonth !== "all") {
+    logSearchParams.set("month", logMonth);
+  }
+
+  if (logYear !== "all") {
+    logSearchParams.set("year", logYear);
+  }
+
+  const ptoLogDownloadUrl = logSearchParams.size > 0
+    ? `/api/admin/pto-log.csv?${logSearchParams.toString()}`
+    : "/api/admin/pto-log.csv";
 
   function toggle(id) {
     setExpandedId((cur) => (cur === id ? "" : id));
@@ -568,11 +867,23 @@ function PtoLog({ requests, onReview, reviewLoadingId }) {
           <p className="eyebrow">PTO Requests</p>
           <h2>Review requests</h2>
         </div>
-        {hasFilters && (
-          <button type="button" className="ghost-button compact-button" onClick={clearFilters}>
-            Clear filters
-          </button>
-        )}
+        <div className="pto-header-actions">
+          {reviewedCount > 0 && (
+            <button
+              type="button"
+              className="deny-button compact-button pto-clear-reviewed-button"
+              onClick={onClearReviewed}
+              disabled={clearingReviewed}
+            >
+              {clearingReviewed ? "Clearing reviewed..." : "Clear reviewed"}
+            </button>
+          )}
+          {hasFilters && (
+            <button type="button" className="ghost-button compact-button" onClick={clearFilters}>
+              Clear filters
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="pto-log-search">
@@ -586,6 +897,30 @@ function PtoLog({ requests, onReview, reviewLoadingId }) {
             aria-label="Search employees"
           />
         </label>
+      </div>
+
+      <div className="pto-log-export-bar">
+        <label className="field pto-log-filter-field">
+          <span>Log month</span>
+          <select value={logMonth} onChange={(event) => setLogMonth(event.target.value)}>
+            {PTO_LOG_MONTHS.map((option) => (
+              <option key={option.key} value={option.key}>{option.label}</option>
+            ))}
+          </select>
+        </label>
+
+        <label className="field pto-log-filter-field">
+          <span>Log year</span>
+          <select value={logYear} onChange={(event) => setLogYear(event.target.value)}>
+            {availableLogYears.map((year) => (
+              <option key={year} value={year}>{year === "all" ? "All years" : year}</option>
+            ))}
+          </select>
+        </label>
+
+        <a className="primary-button pto-log-download-button" href={ptoLogDownloadUrl}>
+          Download PTO log
+        </a>
       </div>
 
       <div className="pto-filter-group">
@@ -659,10 +994,21 @@ function PtoLog({ requests, onReview, reviewLoadingId }) {
                   type="button"
                   className="ghost-button compact-button review-toggle"
                   onClick={() => toggle(req.id)}
-                  disabled={reviewLoadingId === req.id}
+                  disabled={reviewLoadingId === req.id || clearLoadingId === req.id}
                 >
                   Change status
                 </button>
+
+                {req.status !== "pending" && (
+                  <button
+                    type="button"
+                    className="ghost-button compact-button request-clear-button"
+                    onClick={() => onClearRequest(req.id)}
+                    disabled={clearLoadingId === req.id || reviewLoadingId === req.id}
+                  >
+                    {clearLoadingId === req.id ? "Clearing..." : "Clear"}
+                  </button>
+                )}
 
                 {expandedId === req.id && (
                   <div className="review-choice-row">
@@ -869,8 +1215,8 @@ function UploadCard({ title, schedule, uploadDates, onUploadDateChange, onUpload
         </div>
 
         <p className="upload-meta-note">
-          Parsing starts at the row that contains <strong>Name/Date</strong>. Enter the posted date
-          range here before uploading.
+          Parsing starts at the row that contains <strong>Name/Date</strong>. The date range is
+          optional and will never block the upload.
         </p>
 
         <label className="upload-button" aria-label={`Upload ${title}`}>
@@ -910,6 +1256,10 @@ function AdminPanel({
   requests,
   onReview,
   reviewLoadingId,
+  onClearRequest,
+  clearLoadingId,
+  onClearReviewed,
+  clearingReviewed,
   closePanel
 }) {
   const [showPassword, setShowPassword] = useState(false);
@@ -1043,7 +1393,15 @@ function AdminPanel({
           </div>
 
           {view === "dashboard" && (
-            <PtoLog requests={requests} onReview={onReview} reviewLoadingId={reviewLoadingId} />
+            <PtoLog
+              requests={requests}
+              onReview={onReview}
+              reviewLoadingId={reviewLoadingId}
+              onClearRequest={onClearRequest}
+              clearLoadingId={clearLoadingId}
+              onClearReviewed={onClearReviewed}
+              clearingReviewed={clearingReviewed}
+            />
           )}
           {view === "changePassword" && (
             <ChangePasswordSection />
@@ -1066,6 +1424,7 @@ export default function App() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [isSystemUser, setIsSystemUser] = useState(false);
   const [pageMessage, setPageMessage] = useState("");
+  const [undoPtoClear, setUndoPtoClear] = useState(null);
   const [pageError, setPageError] = useState("");
   const [search, setSearch] = useState("");
   const [showOnlyAssigned, setShowOnlyAssigned] = useState(false);
@@ -1073,8 +1432,11 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState(false);
   const [ptoSubmitting, setPtoSubmitting] = useState(false);
   const [reviewLoadingId, setReviewLoadingId] = useState("");
+  const [clearLoadingId, setClearLoadingId] = useState("");
+  const [clearingReviewed, setClearingReviewed] = useState(false);
   const [uploadState, setUploadState] = useState({ techs: false, pharmacists: false });
   const [uploadDates, setUploadDates] = useState(() => createUploadRangeState());
+  const [savedUploadDates, setSavedUploadDates] = useState(() => createUploadRangeState());
   const [loginForm, setLoginForm] = useState({ username: "", password: "" });
   const [ptoForm, setPtoForm] = useState({
     employeeName: "",
@@ -1129,7 +1491,9 @@ export default function App() {
         apiRequest("/api/auth/session")
       ]);
       setSchedules(schedulePayload.schedules);
-      setUploadDates(createUploadRangeState(schedulePayload.schedules));
+      const nextUploadDates = createUploadRangeState(schedulePayload.schedules);
+      setUploadDates(nextUploadDates);
+      setSavedUploadDates(nextUploadDates);
       setIsAdmin(sessionPayload.authenticated);
       setIsSystemUser(Boolean(sessionPayload.isSystem));
       if (!schedulePayload.schedules.techs && schedulePayload.schedules.pharmacists) {
@@ -1166,6 +1530,73 @@ export default function App() {
     }));
   }
 
+  function hasPendingUploadDateChanges() {
+    return ["techs", "pharmacists"].some((scheduleType) => {
+      const current = uploadDates[scheduleType];
+      const saved = savedUploadDates[scheduleType];
+      return current.startDate !== saved.startDate || current.endDate !== saved.endDate;
+    });
+  }
+
+  async function syncScheduleMetadataOnClose() {
+    const changedScheduleTypes = ["techs", "pharmacists"].filter((scheduleType) => {
+      const current = uploadDates[scheduleType];
+      const saved = savedUploadDates[scheduleType];
+      return (
+        schedules[scheduleType] &&
+        (current.startDate !== saved.startDate || current.endDate !== saved.endDate)
+      );
+    });
+
+    if (changedScheduleTypes.length === 0) {
+      return;
+    }
+
+    try {
+      const results = await Promise.all(
+        changedScheduleTypes.map(async (scheduleType) => {
+          const payload = await apiRequest(`/api/admin/schedules/${scheduleType}/metadata`, {
+            method: "PATCH",
+            body: JSON.stringify(uploadDates[scheduleType])
+          });
+
+          return [scheduleType, payload.schedule];
+        })
+      );
+
+      setSchedules((current) => {
+        const next = { ...current };
+        for (const [scheduleType, schedule] of results) {
+          next[scheduleType] = schedule;
+        }
+        return next;
+      });
+
+      setSavedUploadDates((current) => {
+        const next = { ...current };
+        for (const [scheduleType, schedule] of results) {
+          next[scheduleType] = {
+            startDate: schedule.startDate || "",
+            endDate: schedule.endDate || ""
+          };
+        }
+        return next;
+      });
+      setUploadDates((current) => {
+        const next = { ...current };
+        for (const [scheduleType, schedule] of results) {
+          next[scheduleType] = {
+            startDate: schedule.startDate || "",
+            endDate: schedule.endDate || ""
+          };
+        }
+        return next;
+      });
+    } catch (error) {
+      setPageError(error.message);
+    }
+  }
+
   function resetFilters() {
     setSearch("");
     setShowOnlyAssigned(false);
@@ -1186,11 +1617,13 @@ export default function App() {
       if (result.isSystem) {
         setIsSystemUser(true);
         setIsAdmin(false);
+        setUndoPtoClear(null);
         setPageMessage("System access granted. You may reset the admin password.");
       } else {
         setIsAdmin(true);
         setIsSystemUser(false);
         await loadAdminPtoRequests();
+        setUndoPtoClear(null);
         setPageMessage("Admin access granted.");
       }
     } catch (error) {
@@ -1203,6 +1636,10 @@ export default function App() {
   function closeAdminPanel() {
     setAdminOpen(false);
     setLoginForm({ username: "", password: "" });
+
+    if (isAdmin && hasPendingUploadDateChanges()) {
+      void syncScheduleMetadataOnClose();
+    }
   }
 
   async function handleLogout() {
@@ -1210,35 +1647,45 @@ export default function App() {
     setIsAdmin(false);
     setIsSystemUser(false);
     setPtoRequests([]);
+    setUndoPtoClear(null);
     setPageMessage("Signed out of admin session.");
   }
 
   async function handleUpload(scheduleType, file) {
     const selectedRange = uploadDates[scheduleType];
 
-    if (!selectedRange.startDate || !selectedRange.endDate) {
-      setPageError("Choose the schedule start and end date before uploading.");
-      return;
-    }
-
-    if (selectedRange.endDate < selectedRange.startDate) {
-      setPageError("The schedule end date cannot be before the start date.");
-      return;
-    }
-
     setUploadState((c) => ({ ...c, [scheduleType]: true }));
     setPageError("");
     try {
       const payload = new FormData();
       payload.append("file", file);
-      payload.append("startDate", selectedRange.startDate);
-      payload.append("endDate", selectedRange.endDate);
+      if (selectedRange.startDate) {
+        payload.append("startDate", selectedRange.startDate);
+      }
+      if (selectedRange.endDate) {
+        payload.append("endDate", selectedRange.endDate);
+      }
       const response = await apiRequest(`/api/admin/upload/${scheduleType}`, {
         method: "POST",
         body: payload
       });
       setSchedules((c) => ({ ...c, [scheduleType]: response.schedule }));
+      setUploadDates((current) => ({
+        ...current,
+        [scheduleType]: {
+          startDate: response.schedule.startDate || "",
+          endDate: response.schedule.endDate || ""
+        }
+      }));
+      setSavedUploadDates((current) => ({
+        ...current,
+        [scheduleType]: {
+          startDate: response.schedule.startDate || "",
+          endDate: response.schedule.endDate || ""
+        }
+      }));
       setActiveSchedule(scheduleType);
+      setUndoPtoClear(null);
       setPageMessage(response.message);
     } catch (error) {
       setPageError(error.message);
@@ -1265,6 +1712,7 @@ export default function App() {
       if (isAdmin) setPtoRequests((c) => [payload.request, ...c]);
       setPtoForm({ employeeName: "", scheduleType: activeSchedule, startDate: "", endDate: "", reason: "" });
       setPtoModalOpen(false);
+      setUndoPtoClear(null);
       setPageMessage("PTO request submitted for admin review.");
     } catch (error) {
       setPageError(error.message);
@@ -1276,6 +1724,7 @@ export default function App() {
   async function handleReview(requestId, status) {
     setReviewLoadingId(requestId);
     setPageError("");
+    setUndoPtoClear(null);
     try {
       const payload = await apiRequest(`/api/admin/pto-requests/${requestId}`, {
         method: "PATCH",
@@ -1289,6 +1738,69 @@ export default function App() {
       return false;
     } finally {
       setReviewLoadingId("");
+    }
+  }
+
+  async function handleClearRequest(requestId) {
+    setClearLoadingId(requestId);
+    setPageError("");
+    try {
+      const payload = await apiRequest(`/api/admin/pto-requests/${requestId}`, {
+        method: "DELETE"
+      });
+      setPtoRequests(payload.requests);
+      setPageMessage(payload.message);
+      setUndoPtoClear({
+        requests: payload.deletedRequests ?? [],
+        actionLabel: "Undo"
+      });
+      return true;
+    } catch (error) {
+      setPageError(error.message);
+      return false;
+    } finally {
+      setClearLoadingId("");
+    }
+  }
+
+  async function handleClearReviewedRequests() {
+    setClearingReviewed(true);
+    setPageError("");
+    try {
+      const payload = await apiRequest("/api/admin/pto-requests/reviewed", {
+        method: "DELETE"
+      });
+      setPtoRequests(payload.requests);
+      setPageMessage(payload.message);
+      setUndoPtoClear({
+        requests: payload.deletedRequests ?? [],
+        actionLabel: "Undo"
+      });
+      return true;
+    } catch (error) {
+      setPageError(error.message);
+      return false;
+    } finally {
+      setClearingReviewed(false);
+    }
+  }
+
+  async function handleUndoPtoClear() {
+    if (!undoPtoClear?.requests?.length) {
+      return;
+    }
+
+    setPageError("");
+    try {
+      const payload = await apiRequest("/api/admin/pto-requests/restore", {
+        method: "POST",
+        body: JSON.stringify({ requests: undoPtoClear.requests })
+      });
+      setPtoRequests(payload.requests);
+      setPageMessage(payload.message);
+      setUndoPtoClear(null);
+    } catch (error) {
+      setPageError(error.message);
     }
   }
 
@@ -1309,7 +1821,16 @@ export default function App() {
       />
 
       <main className="page" id="main-content">
-        <AlertBanner tone="success" message={pageMessage} onDismiss={() => setPageMessage("")} />
+        <AlertBanner
+          tone="success"
+          message={pageMessage}
+          onDismiss={() => {
+            setPageMessage("");
+            setUndoPtoClear(null);
+          }}
+          actionLabel={undoPtoClear?.requests?.length ? undoPtoClear.actionLabel : ""}
+          onAction={undoPtoClear?.requests?.length ? handleUndoPtoClear : undefined}
+        />
         <AlertBanner tone="error" message={pageError} onDismiss={() => setPageError("")} />
 
         {loading ? (
@@ -1372,6 +1893,10 @@ export default function App() {
         requests={visibleRequests}
         onReview={handleReview}
         reviewLoadingId={reviewLoadingId}
+        onClearRequest={handleClearRequest}
+        clearLoadingId={clearLoadingId}
+        onClearReviewed={handleClearReviewedRequests}
+        clearingReviewed={clearingReviewed}
         closePanel={closeAdminPanel}
       />
     </div>

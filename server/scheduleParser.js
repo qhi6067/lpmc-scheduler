@@ -158,10 +158,15 @@ function findFirstMeaningful(rows, preferredMatch) {
   return preferred ?? flattened[0] ?? preferredMatch;
 }
 
-export function parseScheduleWorkbook(filePath, scheduleType, originalFileName) {
-  const workbook = XLSX.readFile(filePath, {
-    cellDates: true
-  });
+export function parseScheduleWorkbook(fileSource, scheduleType, originalFileName) {
+  const workbook = Buffer.isBuffer(fileSource)
+    ? XLSX.read(fileSource, {
+        type: "buffer",
+        cellDates: true
+      })
+    : XLSX.readFile(fileSource, {
+        cellDates: true
+      });
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
   const rows = XLSX.utils.sheet_to_json(sheet, {
     header: 1,

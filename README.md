@@ -3,11 +3,35 @@
 A responsive schedule portal for Las Palmas Medical Center with:
 
 - Public schedule viewing for `Techs` and `Pharmacists`
-- Admin-only Excel uploads with temporary credentials `admin` / `admin`
+- Admin-only Excel uploads
 - Cleaner online schedule rendering plus Excel download links
 - Public PTO request submission without user login
 - Admin approval and denial workflow with a PTO history log
 - Three visual themes: `Day`, `Night`, and `Midnight`
+
+## Storage
+
+This app is now built for Vercel-hosted durability:
+
+- Excel uploads are stored in `Vercel Blob`
+- Schedule metadata, PTO requests, and the admin password hash are stored in `Postgres`
+- The latest upload replaces the previous upload for the same schedule type, and the old blob is deleted after a successful swap
+
+## Environment
+
+Copy `.env.example` to `.env.local` for local development and fill in:
+
+- `DATABASE_URL` or `POSTGRES_URL`
+- `BLOB_READ_WRITE_TOKEN`
+- `SESSION_SECRET`
+- Optional `SYSTEM_USERNAME` and `SYSTEM_PASSWORD` overrides for the emergency reset login
+
+Notes:
+
+- `ADMIN_PASSWORD` is only used to seed the first admin password when the database does not have one yet
+- After that, password changes happen through the app and are stored as a hash in Postgres
+- The built-in emergency login defaults to `system` / `manager` unless you override it with env vars
+- Excel uploads larger than about `4.5 MB` should be reduced in size before upload, which matches Vercel's server upload guidance
 
 ## Run locally
 
@@ -26,6 +50,16 @@ npm run build
 npm start
 ```
 
+## Deploy on Vercel
+
+1. Create a Blob store in Vercel Storage so `BLOB_READ_WRITE_TOKEN` is available.
+2. Add a Postgres database and copy its connection string into `DATABASE_URL` or `POSTGRES_URL`.
+3. Set `SESSION_SECRET` to a long random value.
+4. Set `ADMIN_USERNAME` and `ADMIN_PASSWORD` if you want something other than the temporary defaults.
+5. Redeploy.
+
+For local development with the same cloud resources, `vercel env pull .env.local` is the easiest path.
+
 ## Excel format
 
 The parser is built around the current LPMC layout:
@@ -36,7 +70,3 @@ The parser is built around the current LPMC layout:
 - A `Name/Date` header row
 - A `Date:` row with day numbers beneath the weekday headers
 - Employee names in the first column
-
-## Data storage
-
-Uploaded files and PTO history are stored locally in `server/data/`.

@@ -1,47 +1,51 @@
+import "dotenv/config";
 import express from "express";
-import session from "express-session";
 import crypto from "node:crypto";
-import fs from "node:fs";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import multer from "multer";
-import { initializeStore, readState, updateState, UPLOAD_DIR } from "./store.js";
+import { del, put } from "@vercel/blob";
+import {
+  attachAuth,
+  clearAuthCookie,
+  getAuthSessionPayload,
+  isAdmin,
+  isSystem,
+  setAuthCookie,
+  updateAdminPassword,
+  validateAdminCredentials,
+  validateCurrentAdminPassword,
+  validateSystemCredentials
+} from "./auth.js";
+import {
+  createPtoRequest,
+  getSchedule,
+  getSchedules,
+  initializeStore,
+  listPtoRequests,
+  saveSchedule,
+  updatePtoRequestStatus
+} from "./store.js";
 import { parseScheduleWorkbook } from "./scheduleParser.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const projectRoot = path.resolve(__dirname, "..");
 const distDir = path.join(projectRoot, "dist");
+
 const app = express();
 const port = Number.parseInt(process.env.PORT ?? "3001", 10);
-
-const ADMIN_USERNAME = process.env.ADMIN_USERNAME ?? "admin";
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD ?? "admin";
-const SYSTEM_USERNAME = "system";
-const SYSTEM_PASSWORD = "manager";
 const ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+const MAX_UPLOAD_BYTES = Math.floor(4.5 * 1024 * 1024);
 
-initializeStore();
-
-const storage = multer.diskStorage({
-  destination: (_request, _file, callback) => {
-    callback(null, UPLOAD_DIR);
-  },
-  filename: (_request, file, callback) => {
-    const extension = path.extname(file.originalname) || ".xlsx";
-    const safeBase = file.originalname
-      .replace(extension, "")
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .slice(0, 50);
-
-    callback(null, `${Date.now()}-${safeBase || "schedule"}${extension}`);
-  }
-});
+app.set("trust proxy", 1);
 
 const upload = multer({
-  storage,
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: MAX_UPLOAD_BYTES
+  },
   fileFilter: (_request, file, callback) => {
     const extension = path.extname(file.originalname).toLowerCase();
     const allowed = [".xlsx", ".xls", ".csv"];
@@ -56,27 +60,21 @@ const upload = multer({
 });
 
 app.use(express.json({ limit: "2mb" }));
-app.use(
-  session({
-    secret: process.env.SESSION_SECRET ?? "lpmc-scheduler-session-secret",
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-      httpOnly: true,
-      sameSite: "lax",
-      secure: false,
-      maxAge: 1000 * 60 * 60 * 8
-    }
-  })
-);
-
-function getEffectivePassword() {
-  const state = readState();
-  return state.adminPassword || ADMIN_PASSWORD;
-}
+app.use(attachAuth);
 
 function requireAdmin(request, response, next) {
-  if (request.session?.isAdmin) {
+  if (isAdmin(request)) {
+    next();
+    return;
+  }
+
+  response.status(401).json({
+    message: "Admin login required."
+  });
+}
+
+function requireAdminOrSystem(request, response, next) {
+  if (isAdmin(request) || isSystem(request)) {
     next();
     return;
   }
@@ -92,7 +90,16 @@ function serializeSchedule(schedule) {
   }
 
   return {
-    ...schedule,
+    scheduleType: schedule.scheduleType,
+    title: schedule.title,
+    facility: schedule.facility,
+    rangeLabel: schedule.rangeLabel,
+    startDate: schedule.startDate,
+    endDate: schedule.endDate,
+    columns: schedule.columns,
+    employees: schedule.employees,
+    sourceFileName: schedule.sourceFileName,
+    uploadedAt: schedule.uploadedAt,
     downloadUrl: `/api/schedules/${schedule.scheduleType}/download`
   };
 }
@@ -141,32 +148,64 @@ function validatePtoRequest(body) {
   };
 }
 
-app.get("/api/health", (_request, response) => {
-  response.json({ ok: true });
-});
+function sanitizeBaseName(originalFileName) {
+  const extension = path.extname(originalFileName) || ".xlsx";
 
-app.get("/api/auth/session", (request, response) => {
-  response.json({
-    authenticated: Boolean(request.session?.isAdmin),
-    isSystem: Boolean(request.session?.isSystem),
-    username: request.session?.isAdmin ? ADMIN_USERNAME : null
-  });
-});
+  return originalFileName
+    .replace(extension, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 50);
+}
 
-app.post("/api/auth/login", (request, response) => {
-  const { username, password } = request.body ?? {};
+function buildBlobPath(scheduleType, originalFileName) {
+  const extension = path.extname(originalFileName).toLowerCase() || ".xlsx";
+  const safeBase = sanitizeBaseName(originalFileName) || "schedule";
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  return `schedules/${scheduleType}/${stamp}-${safeBase}${extension}`;
+}
 
-  if (username === ADMIN_USERNAME && password === getEffectivePassword()) {
-    request.session.isAdmin = true;
-    request.session.isSystem = false;
-    response.json({ authenticated: true, isSystem: false, username: ADMIN_USERNAME });
+async function deleteBlobIfPresent(pathname) {
+  if (!pathname) {
     return;
   }
 
-  if (username === SYSTEM_USERNAME && password === SYSTEM_PASSWORD) {
-    request.session.isSystem = true;
-    request.session.isAdmin = false;
-    response.json({ authenticated: false, isSystem: true });
+  try {
+    await del(pathname);
+  } catch (error) {
+    console.warn(`Unable to delete blob ${pathname}.`, error);
+  }
+}
+
+app.get("/api/health", async (_request, response) => {
+  await initializeStore();
+  response.json({ ok: true, storage: "vercel-blob-and-postgres" });
+});
+
+app.get("/api/auth/session", (request, response) => {
+  response.json(getAuthSessionPayload(request));
+});
+
+app.post("/api/auth/login", async (request, response) => {
+  const { username, password } = request.body ?? {};
+
+  if (await validateAdminCredentials(username, password)) {
+    setAuthCookie(response, "admin");
+    response.json({
+      authenticated: true,
+      isSystem: false,
+      username
+    });
+    return;
+  }
+
+  if (validateSystemCredentials(username, password)) {
+    setAuthCookie(response, "system");
+    response.json({
+      authenticated: false,
+      isSystem: true
+    });
     return;
   }
 
@@ -175,24 +214,23 @@ app.post("/api/auth/login", (request, response) => {
   });
 });
 
-app.post("/api/auth/logout", (request, response) => {
-  request.session.destroy(() => {
-    response.json({ authenticated: false });
-  });
+app.post("/api/auth/logout", (_request, response) => {
+  clearAuthCookie(response);
+  response.json({ authenticated: false });
 });
 
-app.get("/api/schedules", (_request, response) => {
-  const state = readState();
+app.get("/api/schedules", async (_request, response) => {
+  const schedules = await getSchedules();
 
   response.json({
     schedules: {
-      techs: serializeSchedule(state.schedules.techs),
-      pharmacists: serializeSchedule(state.schedules.pharmacists)
+      techs: serializeSchedule(schedules.techs),
+      pharmacists: serializeSchedule(schedules.pharmacists)
     }
   });
 });
 
-app.get("/api/schedules/:type", (request, response) => {
+app.get("/api/schedules/:type", async (request, response) => {
   const scheduleType = getScheduleType(request);
 
   if (!scheduleType) {
@@ -200,8 +238,7 @@ app.get("/api/schedules/:type", (request, response) => {
     return;
   }
 
-  const state = readState();
-  const schedule = state.schedules[scheduleType];
+  const schedule = await getSchedule(scheduleType);
 
   if (!schedule) {
     response.status(404).json({
@@ -215,7 +252,7 @@ app.get("/api/schedules/:type", (request, response) => {
   });
 });
 
-app.get("/api/schedules/:type/download", (request, response) => {
+app.get("/api/schedules/:type/download", async (request, response) => {
   const scheduleType = getScheduleType(request);
 
   if (!scheduleType) {
@@ -223,94 +260,79 @@ app.get("/api/schedules/:type/download", (request, response) => {
     return;
   }
 
-  const state = readState();
-  const schedule = state.schedules[scheduleType];
+  const schedule = await getSchedule(scheduleType);
 
-  if (!schedule?.storedFileName) {
+  if (!schedule?.blobDownloadUrl) {
     response.status(404).json({ message: "No file available for download." });
     return;
   }
 
-  const filePath = path.join(UPLOAD_DIR, schedule.storedFileName);
-
-  if (!fs.existsSync(filePath)) {
-    response.status(404).json({ message: "The uploaded file could not be found." });
-    return;
-  }
-
-  response.download(filePath, schedule.sourceFileName);
+  response.redirect(schedule.blobDownloadUrl);
 });
 
-app.post(
-  "/api/admin/upload/:type",
-  requireAdmin,
-  upload.single("file"),
-  (request, response) => {
-    const scheduleType = getScheduleType(request);
+app.post("/api/admin/upload/:type", requireAdmin, upload.single("file"), async (request, response) => {
+  const scheduleType = getScheduleType(request);
 
-    if (!scheduleType) {
-      response.status(404).json({ message: "Unknown schedule type." });
-      return;
-    }
-
-    if (!request.file) {
-      response.status(400).json({ message: "Please choose a file to upload." });
-      return;
-    }
-
-    try {
-      const parsedSchedule = parseScheduleWorkbook(
-        request.file.path,
-        scheduleType,
-        request.file.originalname
-      );
-
-      const nextState = updateState((current) => {
-        const previous = current.schedules[scheduleType];
-
-        if (previous?.storedFileName) {
-          const previousPath = path.join(UPLOAD_DIR, previous.storedFileName);
-
-          if (fs.existsSync(previousPath)) {
-            fs.unlinkSync(previousPath);
-          }
-        }
-
-        return {
-          ...current,
-          schedules: {
-            ...current.schedules,
-            [scheduleType]: {
-              ...parsedSchedule,
-              storedFileName: request.file.filename,
-              uploadedAt: new Date().toISOString()
-            }
-          }
-        };
-      });
-
-      response.json({
-        message: `${scheduleType === "techs" ? "Tech" : "Pharmacist"} schedule uploaded.`,
-        schedule: serializeSchedule(nextState.schedules[scheduleType])
-      });
-    } catch (error) {
-      fs.unlink(request.file.path, () => {});
-      response.status(400).json({
-        message: error instanceof Error ? error.message : "Unable to read the uploaded file."
-      });
-    }
-  }
-);
-
-app.post("/api/admin/change-password", (request, response) => {
-  const isAdmin = Boolean(request.session?.isAdmin);
-  const isSystem = Boolean(request.session?.isSystem);
-
-  if (!isAdmin && !isSystem) {
-    response.status(401).json({ message: "Admin login required." });
+  if (!scheduleType) {
+    response.status(404).json({ message: "Unknown schedule type." });
     return;
   }
 
+  if (!request.file?.buffer) {
+    response.status(400).json({ message: "Please choose a file to upload." });
+    return;
+  }
+
+  let parsedSchedule = null;
+
+  try {
+    parsedSchedule = parseScheduleWorkbook(
+      request.file.buffer,
+      scheduleType,
+      request.file.originalname
+    );
+  } catch (error) {
+    if (error instanceof Error) {
+      error.statusCode = 400;
+    }
+
+    throw error;
+  }
+
+  let uploadedBlob = null;
+
+  try {
+    uploadedBlob = await put(buildBlobPath(scheduleType, request.file.originalname), request.file.buffer, {
+      access: "public",
+      contentType: request.file.mimetype || undefined
+    });
+
+    const { schedule, previousBlobPathname } = await saveSchedule({
+      ...parsedSchedule,
+      blobPathname: uploadedBlob.pathname,
+      blobUrl: uploadedBlob.url,
+      blobDownloadUrl: uploadedBlob.downloadUrl
+    });
+
+    if (previousBlobPathname && previousBlobPathname !== uploadedBlob.pathname) {
+      await deleteBlobIfPresent(previousBlobPathname);
+    }
+
+    response.json({
+      message: `${scheduleType === "techs" ? "Tech" : "Pharmacist"} schedule uploaded.`,
+      schedule: serializeSchedule(schedule)
+    });
+  } catch (error) {
+    if (uploadedBlob?.pathname) {
+      await deleteBlobIfPresent(uploadedBlob.pathname);
+    }
+
+    throw error;
+  }
+});
+
+app.post("/api/admin/change-password", requireAdminOrSystem, async (request, response) => {
+  const adminUser = isAdmin(request);
   const { currentPassword, newPassword } = request.body ?? {};
 
   if (!newPassword) {
@@ -318,12 +340,15 @@ app.post("/api/admin/change-password", (request, response) => {
     return;
   }
 
-  if (isAdmin) {
+  if (adminUser) {
     if (!currentPassword) {
       response.status(400).json({ message: "Current password is required." });
       return;
     }
-    if (currentPassword !== getEffectivePassword()) {
+
+    const currentPasswordValid = await validateCurrentAdminPassword(currentPassword);
+
+    if (!currentPasswordValid) {
       response.status(400).json({ message: "Current password is incorrect." });
       return;
     }
@@ -334,22 +359,16 @@ app.post("/api/admin/change-password", (request, response) => {
     return;
   }
 
-  updateState((current) => ({ ...current, adminPassword: newPassword }));
+  await updateAdminPassword(newPassword);
   response.json({ message: "Password updated successfully." });
 });
 
-app.get("/api/admin/pto-requests", requireAdmin, (_request, response) => {
-  const state = readState();
-  const requests = [...state.ptoRequests].sort((left, right) =>
-    right.submittedAt.localeCompare(left.submittedAt)
-  );
-
-  response.json({
-    requests
-  });
+app.get("/api/admin/pto-requests", requireAdmin, async (_request, response) => {
+  const requests = await listPtoRequests();
+  response.json({ requests });
 });
 
-app.post("/api/pto-requests", (request, response) => {
+app.post("/api/pto-requests", async (request, response) => {
   const validated = validatePtoRequest(request.body ?? {});
 
   if ("error" in validated) {
@@ -359,31 +378,25 @@ app.post("/api/pto-requests", (request, response) => {
     return;
   }
 
-  const nextState = updateState((current) => ({
-    ...current,
-    ptoRequests: [
-      {
-        id: crypto.randomUUID(),
-        employeeName: validated.employeeName,
-        scheduleType: validated.scheduleType,
-        startDate: validated.startDate,
-        endDate: validated.endDate,
-        reason: validated.reason,
-        status: "pending",
-        submittedAt: new Date().toISOString(),
-        reviewedAt: null
-      },
-      ...current.ptoRequests
-    ]
-  }));
+  const savedRequest = await createPtoRequest({
+    id: crypto.randomUUID(),
+    employeeName: validated.employeeName,
+    scheduleType: validated.scheduleType,
+    startDate: validated.startDate,
+    endDate: validated.endDate,
+    reason: validated.reason,
+    status: "pending",
+    submittedAt: new Date().toISOString(),
+    reviewedAt: null
+  });
 
   response.status(201).json({
     message: "PTO request submitted.",
-    request: nextState.ptoRequests[0]
+    request: savedRequest
   });
 });
 
-app.patch("/api/admin/pto-requests/:id", requireAdmin, (request, response) => {
+app.patch("/api/admin/pto-requests/:id", requireAdmin, async (request, response) => {
   const { id } = request.params;
   const { status } = request.body ?? {};
 
@@ -394,24 +407,7 @@ app.patch("/api/admin/pto-requests/:id", requireAdmin, (request, response) => {
     return;
   }
 
-  let updatedRequest = null;
-
-  const nextState = updateState((current) => ({
-    ...current,
-    ptoRequests: current.ptoRequests.map((entry) => {
-      if (entry.id !== id) {
-        return entry;
-      }
-
-      updatedRequest = {
-        ...entry,
-        status,
-        reviewedAt: new Date().toISOString()
-      };
-
-      return updatedRequest;
-    })
-  }));
+  const updatedRequest = await updatePtoRequestStatus(id, status);
 
   if (!updatedRequest) {
     response.status(404).json({ message: "PTO request not found." });
@@ -421,11 +417,11 @@ app.patch("/api/admin/pto-requests/:id", requireAdmin, (request, response) => {
   response.json({
     message: `PTO request ${status}.`,
     request: updatedRequest,
-    requests: nextState.ptoRequests
+    requests: await listPtoRequests()
   });
 });
 
-if (fs.existsSync(distDir)) {
+if (existsSync(distDir)) {
   app.use(express.static(distDir));
   app.get(/^\/(?!api).*/, (request, response, next) => {
     if (request.path.startsWith("/api")) {
@@ -438,7 +434,16 @@ if (fs.existsSync(distDir)) {
 }
 
 app.use((error, _request, response, _next) => {
-  response.status(400).json({
+  if (error?.code === "LIMIT_FILE_SIZE") {
+    response.status(400).json({
+      message: "Please upload an Excel file smaller than 4.5 MB."
+    });
+    return;
+  }
+
+  const statusCode = Number.isInteger(error?.statusCode) ? error.statusCode : 500;
+
+  response.status(statusCode).json({
     message: error instanceof Error ? error.message : "Something went wrong."
   });
 });

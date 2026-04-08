@@ -1695,14 +1695,14 @@ function ShiftEditorPanel({ schedules, onScheduleUpdate, onBack }) {
 
   return (
     <div className="modal-body">
+      <button type="button" className="ghost-button compact-button shift-back-btn" onClick={onBack}>
+        ← Dashboard
+      </button>
       <div className="section-heading">
         <div>
           <p className="eyebrow">Schedule Management</p>
           <h2>Edit Shifts</h2>
         </div>
-        <button type="button" className="ghost-button compact-button" onClick={onBack}>
-          ← Dashboard
-        </button>
       </div>
 
       {mode === null && (

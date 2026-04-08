@@ -1496,7 +1496,7 @@ function AdminPanel({
                 <p className="eyebrow">Admin dashboard</p>
                 <h2>Schedules &amp; PTO</h2>
               </div>
-              <div style={{ display: "flex", gap: "0.5rem" }}>
+              <div className="admin-header-actions">
                 <button type="button" className="ghost-button" onClick={() => setView((v) => v === "changePassword" ? "dashboard" : "changePassword")}>
                   {view === "changePassword" ? "← Dashboard" : "Change Password"}
                 </button>

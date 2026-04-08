@@ -1681,7 +1681,7 @@ function DirectSwitchView({ schedules, activeType, onTypeChange, onScheduleUpdat
   );
 }
 
-function ShiftEditorPanel({ schedules, onScheduleUpdate }) {
+function ShiftEditorPanel({ schedules, onScheduleUpdate, onBack }) {
   const [mode, setMode] = useState(null);
   const [activeType, setActiveType] = useState("techs");
 
@@ -1700,6 +1700,9 @@ function ShiftEditorPanel({ schedules, onScheduleUpdate }) {
           <p className="eyebrow">Schedule Management</p>
           <h2>Edit Shifts</h2>
         </div>
+        <button type="button" className="ghost-button compact-button" onClick={onBack}>
+          ← Dashboard
+        </button>
       </div>
 
       {mode === null && (
@@ -1915,6 +1918,7 @@ function AdminPanel({
             <ShiftEditorPanel
               schedules={schedules}
               onScheduleUpdate={onScheduleUpdate}
+              onBack={() => setView("dashboard")}
             />
           )}
 

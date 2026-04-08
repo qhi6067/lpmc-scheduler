@@ -1390,6 +1390,294 @@ function UploadCard({ title, schedule, uploadDates, onUploadDateChange, onUpload
   );
 }
 
+// ─── Shift Editor ────────────────────────────────────────────────────────────
+
+function ManualEntryView({ schedules, activeType, onTypeChange, onCellSave, onBack }) {
+  const [saving, setSaving] = useState({});
+  const [cellErrors, setCellErrors] = useState({});
+  const schedule = schedules[activeType];
+
+  async function handleBlur(empIdx, colIdx, el) {
+    const key = `${empIdx}-${colIdx}`;
+    const original = schedule?.employees[empIdx]?.assignments[colIdx] ?? "";
+    const next = el.value;
+    if (next === original) return;
+    setSaving((s) => ({ ...s, [key]: true }));
+    setCellErrors((e) => { const c = { ...e }; delete c[key]; return c; });
+    try {
+      await onCellSave(empIdx, colIdx, next);
+    } catch {
+      setCellErrors((e) => ({ ...e, [key]: true }));
+      el.value = original;
+    } finally {
+      setSaving((s) => { const c = { ...s }; delete c[key]; return c; });
+    }
+  }
+
+  return (
+    <div className="shift-editor-view">
+      <div className="shift-editor-toolbar">
+        <button type="button" className="ghost-button compact-button" onClick={onBack}>
+          ← Back
+        </button>
+        <div className="shift-type-tabs">
+          {[{ key: "techs", label: "Techs" }, { key: "pharmacists", label: "Pharmacists" }].map((t) => (
+            <button
+              key={t.key}
+              type="button"
+              className={`shift-type-tab ${activeType === t.key ? "is-active" : ""}`}
+              onClick={() => onTypeChange(t.key)}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+        <span className="shift-editor-hint">Click any cell to edit. Changes save automatically.</span>
+      </div>
+
+      {!schedule || schedule.employees.length === 0 ? (
+        <div className="shift-editor-empty">
+          No {activeType} schedule is available to edit.
+        </div>
+      ) : (
+        <div className="shift-edit-table-wrap">
+          <table className="shift-edit-table">
+            <thead>
+              <tr>
+                <th className="shift-name-col">Employee</th>
+                {schedule.columns.map((col) => (
+                  <th key={col.label}>{col.label}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {schedule.employees.map((emp, empIdx) => (
+                <tr key={emp.name}>
+                  <td className="shift-name-col shift-name-cell">{emp.name}</td>
+                  {schedule.columns.map((col, colIdx) => {
+                    const key = `${empIdx}-${colIdx}`;
+                    return (
+                      <td
+                        key={`${emp.name}-${col.label}`}
+                        className={`shift-edit-cell ${saving[key] ? "is-saving" : ""} ${cellErrors[key] ? "is-error" : ""}`}
+                      >
+                        <input
+                          type="text"
+                          defaultValue={emp.assignments[colIdx] ?? ""}
+                          onBlur={(e) => handleBlur(empIdx, colIdx, e.target)}
+                          onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
+                          aria-label={`${emp.name} — ${col.label}`}
+                        />
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DirectSwitchView({ schedules, activeType, onTypeChange, onScheduleUpdate, onBack }) {
+  const [colIdx, setColIdx] = useState("");
+  const [emp1Idx, setEmp1Idx] = useState("");
+  const [emp2Idx, setEmp2Idx] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [result, setResult] = useState(null); // { ok, message }
+
+  const schedule = schedules[activeType];
+  const employees = schedule?.employees ?? [];
+  const columns = schedule?.columns ?? [];
+
+  const emp1 = employees[Number(emp1Idx)];
+  const emp2 = employees[Number(emp2Idx)];
+  const col = columns[Number(colIdx)];
+  const canSwap = emp1Idx !== "" && emp2Idx !== "" && colIdx !== "" && emp1Idx !== emp2Idx;
+
+  async function handleSwap(e) {
+    e.preventDefault();
+    setSubmitting(true);
+    setResult(null);
+    try {
+      const payload = await apiRequest(`/api/admin/schedules/${activeType}/swap`, {
+        method: "POST",
+        body: JSON.stringify({
+          employee1Index: Number(emp1Idx),
+          employee2Index: Number(emp2Idx),
+          columnIndex: Number(colIdx)
+        })
+      });
+      onScheduleUpdate(activeType, payload.schedule);
+      setResult({ ok: true, message: payload.message });
+      setEmp1Idx(""); setEmp2Idx(""); setColIdx("");
+    } catch (err) {
+      setResult({ ok: false, message: err.message });
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  function handleTypeChange(t) {
+    onTypeChange(t);
+    setEmp1Idx(""); setEmp2Idx(""); setColIdx(""); setResult(null);
+  }
+
+  return (
+    <div className="shift-editor-view">
+      <div className="shift-editor-toolbar">
+        <button type="button" className="ghost-button compact-button" onClick={onBack}>
+          ← Back
+        </button>
+        <div className="shift-type-tabs">
+          {[{ key: "techs", label: "Techs" }, { key: "pharmacists", label: "Pharmacists" }].map((t) => (
+            <button
+              key={t.key}
+              type="button"
+              className={`shift-type-tab ${activeType === t.key ? "is-active" : ""}`}
+              onClick={() => handleTypeChange(t.key)}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {result && (
+        <div className={result.ok ? "inline-success" : "inline-error"} role={result.ok ? "status" : "alert"}>
+          {result.message}
+        </div>
+      )}
+
+      {!schedule || employees.length === 0 ? (
+        <div className="shift-editor-empty">No {activeType} schedule available.</div>
+      ) : (
+        <form className="direct-switch-form" onSubmit={handleSwap}>
+          <div className="form-grid">
+            <label className="field field-wide">
+              <span>Day to swap</span>
+              <select value={colIdx} onChange={(e) => setColIdx(e.target.value)} required>
+                <option value="">— Select day —</option>
+                {columns.map((col, i) => (
+                  <option key={i} value={i}>{col.label}</option>
+                ))}
+              </select>
+            </label>
+
+            <label className="field">
+              <span>Employee 1</span>
+              <select value={emp1Idx} onChange={(e) => setEmp1Idx(e.target.value)} required>
+                <option value="">— Select employee —</option>
+                {employees.map((emp, i) => (
+                  <option key={i} value={i}>{emp.name}</option>
+                ))}
+              </select>
+            </label>
+
+            <label className="field">
+              <span>Employee 2</span>
+              <select value={emp2Idx} onChange={(e) => setEmp2Idx(e.target.value)} required>
+                <option value="">— Select employee —</option>
+                {employees.map((emp, i) => (
+                  <option key={i} value={i} disabled={String(i) === emp1Idx}>{emp.name}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          {canSwap && col && (
+            <div className="swap-preview">
+              <p className="swap-preview-label">Preview — {col.label}</p>
+              <div className="swap-preview-row">
+                <div className="swap-preview-card">
+                  <span className="swap-preview-name">{emp1?.name}</span>
+                  <span className="swap-arrow">→</span>
+                  <span className={`cell-badge ${getAssignmentTone(emp2?.assignments[Number(colIdx)] || "Off")}`}>
+                    {emp2?.assignments[Number(colIdx)] || "Off"}
+                  </span>
+                </div>
+                <div className="swap-preview-divider">⇄</div>
+                <div className="swap-preview-card">
+                  <span className="swap-preview-name">{emp2?.name}</span>
+                  <span className="swap-arrow">→</span>
+                  <span className={`cell-badge ${getAssignmentTone(emp1?.assignments[Number(colIdx)] || "Off")}`}>
+                    {emp1?.assignments[Number(colIdx)] || "Off"}
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div className="modal-actions">
+            <button type="submit" className="primary-button" disabled={!canSwap || submitting}>
+              {submitting ? "Swapping…" : "Confirm Swap"}
+            </button>
+          </div>
+        </form>
+      )}
+    </div>
+  );
+}
+
+function ShiftEditorPanel({ schedules, onScheduleUpdate }) {
+  const [mode, setMode] = useState(null);
+  const [activeType, setActiveType] = useState("techs");
+
+  async function handleCellSave(empIdx, colIdx, value) {
+    const payload = await apiRequest(`/api/admin/schedules/${activeType}/cells`, {
+      method: "PATCH",
+      body: JSON.stringify({ employeeIndex: empIdx, columnIndex: colIdx, value })
+    });
+    onScheduleUpdate(activeType, payload.schedule);
+  }
+
+  return (
+    <div className="modal-body">
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">Schedule Management</p>
+          <h2>Edit Shifts</h2>
+        </div>
+      </div>
+
+      {mode === null && (
+        <div className="shift-mode-grid">
+          <button type="button" className="shift-mode-card" onClick={() => setMode("manual")}>
+            <strong>Manual Entry</strong>
+            <span>Edit any cell directly in the schedule table. Free-form, no restrictions.</span>
+          </button>
+          <button type="button" className="shift-mode-card" onClick={() => setMode("switch")}>
+            <strong>Direct Switch</strong>
+            <span>Swap shifts between two employees on a specific day.</span>
+          </button>
+        </div>
+      )}
+
+      {mode === "manual" && (
+        <ManualEntryView
+          schedules={schedules}
+          activeType={activeType}
+          onTypeChange={setActiveType}
+          onCellSave={handleCellSave}
+          onBack={() => setMode(null)}
+        />
+      )}
+
+      {mode === "switch" && (
+        <DirectSwitchView
+          schedules={schedules}
+          activeType={activeType}
+          onTypeChange={setActiveType}
+          onScheduleUpdate={onScheduleUpdate}
+          onBack={() => setMode(null)}
+        />
+      )}
+    </div>
+  );
+}
+
 // ─── Admin Panel ─────────────────────────────────────────────────────────────
 
 function AdminPanel({
@@ -1413,6 +1701,7 @@ function AdminPanel({
   clearLoadingId,
   onClearReviewed,
   clearingReviewed,
+  onScheduleUpdate,
   closePanel
 }) {
   const [showPassword, setShowPassword] = useState(false);
@@ -1497,7 +1786,11 @@ function AdminPanel({
                 <h2>Schedules &amp; PTO</h2>
               </div>
               <div className="admin-header-actions">
-                <button type="button" className="ghost-button" onClick={() => setView((v) => v === "changePassword" ? "dashboard" : "changePassword")}>
+                <button
+                  type="button"
+                  className="ghost-button"
+                  onClick={() => setView((v) => v === "changePassword" ? "dashboard" : "changePassword")}
+                >
                   {view === "changePassword" ? "← Dashboard" : "Change Password"}
                 </button>
                 <button type="button" className="ghost-button" onClick={onLogout}>
@@ -1541,9 +1834,28 @@ function AdminPanel({
                     <strong>{counts.denied}</strong>
                   </article>
                 </div>
+
+                <button
+                  type="button"
+                  className="edit-shifts-btn"
+                  onClick={() => setView("shiftEditor")}
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                    <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+                  </svg>
+                  Edit Shifts
+                </button>
               </>
             )}
           </div>
+
+          {view === "shiftEditor" && (
+            <ShiftEditorPanel
+              schedules={schedules}
+              onScheduleUpdate={onScheduleUpdate}
+            />
+          )}
 
           {view === "dashboard" && (
             <PtoLog
@@ -2047,6 +2359,7 @@ export default function App() {
         clearLoadingId={clearLoadingId}
         onClearReviewed={handleClearReviewedRequests}
         clearingReviewed={clearingReviewed}
+        onScheduleUpdate={(type, schedule) => setSchedules((prev) => ({ ...prev, [type]: schedule }))}
         closePanel={closeAdminPanel}
       />
     </div>

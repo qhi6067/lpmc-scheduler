@@ -810,6 +810,118 @@ app.delete("/api/admin/pto-requests/:id", requireAdmin, async (request, response
   });
 });
 
+app.patch("/api/admin/schedules/:type/cells", requireAdmin, async (request, response) => {
+  const scheduleType = getScheduleType(request);
+
+  if (!scheduleType) {
+    response.status(404).json({ message: "Unknown schedule type." });
+    return;
+  }
+
+  const schedule = await getSchedule(scheduleType);
+
+  if (!schedule) {
+    response.status(404).json({ message: "No schedule has been uploaded for this type." });
+    return;
+  }
+
+  const { employeeIndex, columnIndex, value } = request.body ?? {};
+
+  if (!Number.isInteger(employeeIndex) || !Number.isInteger(columnIndex)) {
+    response.status(400).json({ message: "employeeIndex and columnIndex must be integers." });
+    return;
+  }
+
+  if (employeeIndex < 0 || employeeIndex >= schedule.employees.length) {
+    response.status(400).json({ message: "Invalid employee index." });
+    return;
+  }
+
+  if (columnIndex < 0 || columnIndex >= schedule.columns.length) {
+    response.status(400).json({ message: "Invalid column index." });
+    return;
+  }
+
+  const employees = schedule.employees.map((e, i) =>
+    i === employeeIndex
+      ? { ...e, assignments: e.assignments.map((a, j) => (j === columnIndex ? String(value ?? "") : a)) }
+      : e
+  );
+
+  const { schedule: saved } = await saveSchedule({ ...schedule, employees });
+
+  response.json({
+    message: "Cell updated.",
+    schedule: serializeSchedule(saved)
+  });
+});
+
+app.post("/api/admin/schedules/:type/swap", requireAdmin, async (request, response) => {
+  const scheduleType = getScheduleType(request);
+
+  if (!scheduleType) {
+    response.status(404).json({ message: "Unknown schedule type." });
+    return;
+  }
+
+  const schedule = await getSchedule(scheduleType);
+
+  if (!schedule) {
+    response.status(404).json({ message: "No schedule has been uploaded for this type." });
+    return;
+  }
+
+  const { employee1Index, employee2Index, columnIndex } = request.body ?? {};
+
+  if (!Number.isInteger(employee1Index) || !Number.isInteger(employee2Index) || !Number.isInteger(columnIndex)) {
+    response.status(400).json({ message: "employee1Index, employee2Index, and columnIndex must be integers." });
+    return;
+  }
+
+  if (employee1Index === employee2Index) {
+    response.status(400).json({ message: "Please choose two different employees." });
+    return;
+  }
+
+  const maxEmpIdx = schedule.employees.length - 1;
+
+  if (employee1Index < 0 || employee1Index > maxEmpIdx || employee2Index < 0 || employee2Index > maxEmpIdx) {
+    response.status(400).json({ message: "Invalid employee index." });
+    return;
+  }
+
+  if (columnIndex < 0 || columnIndex >= schedule.columns.length) {
+    response.status(400).json({ message: "Invalid column index." });
+    return;
+  }
+
+  const emp1Name = schedule.employees[employee1Index].name;
+  const emp2Name = schedule.employees[employee2Index].name;
+
+  const employees = schedule.employees.map((e, i) => {
+    if (i === employee1Index) {
+      const next = [...e.assignments];
+      next[columnIndex] = schedule.employees[employee2Index].assignments[columnIndex];
+      return { ...e, assignments: next };
+    }
+
+    if (i === employee2Index) {
+      const next = [...e.assignments];
+      next[columnIndex] = schedule.employees[employee1Index].assignments[columnIndex];
+      return { ...e, assignments: next };
+    }
+
+    return e;
+  });
+
+  const { schedule: saved } = await saveSchedule({ ...schedule, employees });
+
+  response.json({
+    message: `Shifted swapped between ${emp1Name} and ${emp2Name} on ${schedule.columns[columnIndex].label}.`,
+    schedule: serializeSchedule(saved)
+  });
+});
+
 app.post("/api/admin/pto-requests/restore", requireAdmin, async (request, response) => {
   const deletedRequests = Array.isArray(request.body?.requests) ? request.body.requests : [];
   const restoredRequests = await restorePtoRequests(deletedRequests);

@@ -1222,7 +1222,7 @@ h1, h2, h3 {
 .pto-log-search {
   display: flex;
   gap: 0.75rem;
-  margin-bottom: 0.85rem;
+  margin-bottom: 0.5rem;
 }
 
 .pto-header-actions {
@@ -1236,29 +1236,12 @@ h1, h2, h3 {
 
 .pto-log-search .filter-search-field input { width: 100%; }
 
-.pto-log-export-bar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: end;
-  gap: 0.85rem;
-  margin-bottom: 1rem;
-}
-
 .pto-log-filter-field {
-  min-width: 11rem;
-  flex: 0 1 12rem;
+  min-width: 7rem;
+  flex: 0 1 9rem;
 }
 
 .pto-log-download-button { text-decoration: none; }
-
-.pto-filter-group {
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-  margin-bottom: 1rem;
-}
-
-.pto-filter-group .status-filter-row { margin-bottom: 0; }
 
 .request-list {
   display: flex;
@@ -2060,6 +2043,146 @@ h1, h2, h3 {
   flex-shrink: 0;
 }
 
+/* ── Manual entry confirm ── */
+.shift-unsaved-dot {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--warning);
+  font-family: "Figtree", sans-serif;
+  white-space: nowrap;
+}
+
+.shift-save-btn { margin-left: auto; }
+
+/* ─── PTO expand bar ─────────────────────────────────────────────────────────── */
+
+.pto-expand-bar {
+  padding: 0 1.4rem 1rem;
+}
+
+.pto-expand-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.75rem 1rem;
+  border-radius: var(--r-md);
+  border: 1px dashed var(--line-strong);
+  background: var(--bg-soft);
+  color: var(--text-muted);
+  font-family: "Figtree", sans-serif;
+  font-weight: 600;
+  font-size: 0.88rem;
+  cursor: pointer;
+  transition: background var(--t-base), color var(--t-base), border-color var(--t-base);
+  justify-content: center;
+}
+
+.pto-expand-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+  border-color: var(--accent);
+  border-style: solid;
+}
+
+.pto-expand-chevron {
+  transition: transform var(--t-base);
+}
+
+.pto-expand-chevron.is-open {
+  transform: rotate(180deg);
+}
+
+/* ─── PTO filter dropdown ────────────────────────────────────────────────────── */
+
+.pto-toolbar {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.pto-toolbar .filter-search-field { min-width: 10rem; }
+.pto-toolbar .filter-search-field input { width: 100%; }
+
+.pto-log-export-bar {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  padding: 0;
+}
+
+.pto-filter-dropdown-wrap {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.pto-filter-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  position: relative;
+}
+
+.pto-filter-btn.is-open {
+  background: var(--bg-hover);
+  border-color: var(--line-strong);
+}
+
+.filter-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.1rem;
+  height: 1.1rem;
+  padding: 0 0.2rem;
+  border-radius: var(--r-full);
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.65rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.pto-filter-dropdown {
+  position: absolute;
+  top: calc(100% + 0.4rem);
+  left: 0;
+  z-index: 60;
+  width: 18rem;
+  max-width: calc(100vw - 2rem);
+  border-radius: var(--r-lg);
+  border: 1px solid var(--line);
+  background: var(--bg-panel);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  box-shadow: var(--shadow-lg);
+  padding: 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  animation: dropdown-in 140ms ease;
+}
+
+.pto-filter-section { display: flex; flex-direction: column; gap: 0.5rem; }
+
+.pto-filter-section-label {
+  margin: 0;
+  font-family: "Figtree", sans-serif;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+
+.pto-filter-clear {
+  width: 100%;
+  justify-content: center;
+  border-color: var(--line-strong);
+}
+
 /* ─── Notification Bell ─────────────────────────────────────────────────────── */
 
 .notif-bell-wrapper {
@@ -2442,19 +2565,15 @@ h1, h2, h3 {
   .admin-header-actions .ghost-button { flex: 1; justify-content: center; }
 
   /* ── PTO log ── */
-  .pto-log-export-bar {
-    flex-direction: column;
-    align-items: stretch;
-  }
+  .pto-toolbar { flex-direction: column; align-items: stretch; }
+  .pto-filter-dropdown { width: calc(100vw - 2rem); left: 0; }
+  .pto-log-export-bar { flex-direction: column; align-items: stretch; }
   .pto-log-filter-field { min-width: 0; flex: 1; }
-  .pto-log-download-button {
-    width: 100%;
-    text-align: center;
-    justify-content: center;
-  }
+  .pto-log-download-button { width: 100%; text-align: center; justify-content: center; }
   .pto-header-actions { flex-wrap: wrap; }
   .pto-header-actions .ghost-button,
   .pto-header-actions .deny-button { flex: 1; justify-content: center; }
+  .pto-expand-bar { padding: 0 1rem 0.25rem; }
 
   /* ── Request cards ── */
   .request-card {
@@ -2491,7 +2610,7 @@ h1, h2, h3 {
   .modal-topbar { padding: 0.75rem 0.85rem 0; }
 
   /* Stack filter chips if needed */
-  .pto-filter-group .status-filter-row { flex-wrap: wrap; }
+  .pto-filter-section .status-filter-row { flex-wrap: wrap; }
 
   /* Notification dropdown narrower */
   .notif-dropdown { width: calc(100vw - 1.5rem); }

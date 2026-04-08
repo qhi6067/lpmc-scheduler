@@ -948,6 +948,8 @@ function PtoLog({ requests, onReview, reviewLoadingId, onClearRequest, clearLoad
   const [search, setSearch] = useState("");
   const [logMonth, setLogMonth] = useState("all");
   const [logYear, setLogYear] = useState("all");
+  const [filterOpen, setFilterOpen] = useState(false);
+  const filterRef = useRef(null);
 
   const counts = useMemo(() =>
     requests.reduce(
@@ -1007,6 +1009,17 @@ function PtoLog({ requests, onReview, reviewLoadingId, onClearRequest, clearLoad
     if (ok) setExpandedId("");
   }
 
+  const activeFilterCount = (statusFilter !== "all" ? 1 : 0) + (typeFilter !== "all" ? 1 : 0);
+
+  useEffect(() => {
+    if (!filterOpen) return undefined;
+    function handleOutside(e) {
+      if (!filterRef.current?.contains(e.target)) setFilterOpen(false);
+    }
+    document.addEventListener("mousedown", handleOutside);
+    return () => document.removeEventListener("mousedown", handleOutside);
+  }, [filterOpen]);
+
   function clearFilters() {
     setStatusFilter("all");
     setTypeFilter("all");
@@ -1028,18 +1041,14 @@ function PtoLog({ requests, onReview, reviewLoadingId, onClearRequest, clearLoad
               onClick={onClearReviewed}
               disabled={clearingReviewed}
             >
-              {clearingReviewed ? "Clearing reviewed..." : "Clear reviewed"}
-            </button>
-          )}
-          {hasFilters && (
-            <button type="button" className="ghost-button compact-button" onClick={clearFilters}>
-              Clear filters
+              {clearingReviewed ? "Clearing…" : "Clear reviewed"}
             </button>
           )}
         </div>
       </div>
 
-      <div className="pto-log-search">
+      {/* Search + filter row */}
+      <div className="pto-toolbar">
         <label className="filter-search-field" style={{ flex: 1 }}>
           <span className="sr-only">Search employee</span>
           <input
@@ -1050,65 +1059,87 @@ function PtoLog({ requests, onReview, reviewLoadingId, onClearRequest, clearLoad
             aria-label="Search employees"
           />
         </label>
-      </div>
 
-      <div className="pto-log-export-bar">
-        <label className="field pto-log-filter-field">
-          <span>Log month</span>
-          <select value={logMonth} onChange={(event) => setLogMonth(event.target.value)}>
-            {PTO_LOG_MONTHS.map((option) => (
-              <option key={option.key} value={option.key}>{option.label}</option>
-            ))}
-          </select>
-        </label>
+        {/* Filter dropdown */}
+        <div className="pto-filter-dropdown-wrap" ref={filterRef}>
+          <button
+            type="button"
+            className={`ghost-button compact-button pto-filter-btn ${filterOpen ? "is-open" : ""}`}
+            onClick={() => setFilterOpen((v) => !v)}
+            aria-expanded={filterOpen}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+            Filters
+            {activeFilterCount > 0 && <span className="filter-badge">{activeFilterCount}</span>}
+          </button>
 
-        <label className="field pto-log-filter-field">
-          <span>Log year</span>
-          <select value={logYear} onChange={(event) => setLogYear(event.target.value)}>
-            {availableLogYears.map((year) => (
-              <option key={year} value={year}>{year === "all" ? "All years" : year}</option>
-            ))}
-          </select>
-        </label>
+          {filterOpen && (
+            <div className="pto-filter-dropdown" role="dialog" aria-label="Filters">
+              <div className="pto-filter-section">
+                <p className="pto-filter-section-label">Status</p>
+                <div className="status-filter-row">
+                  {PTO_STATUS_FILTERS.map((f) => {
+                    const count = f.key === "all" ? requests.length : counts[f.key];
+                    return (
+                      <button
+                        key={f.key}
+                        type="button"
+                        className={`status-chip ${statusFilter === f.key ? "is-active" : ""}`}
+                        onClick={() => setStatusFilter(f.key)}
+                      >
+                        {f.label}
+                        <span className="chip-count">{count}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
 
-        <a className="primary-button pto-log-download-button" href={ptoLogDownloadUrl}>
-          Download PTO log
-        </a>
-      </div>
+              <div className="pto-filter-section">
+                <p className="pto-filter-section-label">Position</p>
+                <div className="status-filter-row">
+                  {PTO_TYPE_FILTERS.map((f) => {
+                    const count = f.key === "all" ? requests.length : (typeCounts[f.key] || 0);
+                    return (
+                      <button
+                        key={f.key}
+                        type="button"
+                        className={`status-chip ${typeFilter === f.key ? "is-active" : ""}`}
+                        onClick={() => setTypeFilter(f.key)}
+                      >
+                        {f.label}
+                        <span className="chip-count">{count}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
 
-      <div className="pto-filter-group">
-        <div className="status-filter-row">
-          {PTO_STATUS_FILTERS.map((f) => {
-            const count = f.key === "all" ? requests.length : counts[f.key];
-            return (
-              <button
-                key={f.key}
-                type="button"
-                className={`status-chip ${statusFilter === f.key ? "is-active" : ""}`}
-                onClick={() => setStatusFilter(f.key)}
-              >
-                {f.label}
-                <span className="chip-count">{count}</span>
-              </button>
-            );
-          })}
+              {(activeFilterCount > 0 || search.trim()) && (
+                <button type="button" className="ghost-button compact-button pto-filter-clear" onClick={() => { clearFilters(); setFilterOpen(false); }}>
+                  Clear all filters
+                </button>
+              )}
+            </div>
+          )}
         </div>
 
-        <div className="status-filter-row">
-          {PTO_TYPE_FILTERS.map((f) => {
-            const count = f.key === "all" ? requests.length : (typeCounts[f.key] || 0);
-            return (
-              <button
-                key={f.key}
-                type="button"
-                className={`status-chip ${typeFilter === f.key ? "is-active" : ""}`}
-                onClick={() => setTypeFilter(f.key)}
-              >
-                {f.label}
-                <span className="chip-count">{count}</span>
-              </button>
-            );
-          })}
+        <div className="pto-log-export-bar">
+          <label className="field pto-log-filter-field">
+            <span>Month</span>
+            <select value={logMonth} onChange={(e) => setLogMonth(e.target.value)}>
+              {PTO_LOG_MONTHS.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
+            </select>
+          </label>
+          <label className="field pto-log-filter-field">
+            <span>Year</span>
+            <select value={logYear} onChange={(e) => setLogYear(e.target.value)}>
+              {availableLogYears.map((y) => <option key={y} value={y}>{y === "all" ? "All" : y}</option>)}
+            </select>
+          </label>
+          <a className="ghost-button compact-button pto-log-download-button" href={ptoLogDownloadUrl}>
+            Export CSV
+          </a>
         </div>
       </div>
 
@@ -1393,25 +1424,46 @@ function UploadCard({ title, schedule, uploadDates, onUploadDateChange, onUpload
 // ─── Shift Editor ────────────────────────────────────────────────────────────
 
 function ManualEntryView({ schedules, activeType, onTypeChange, onCellSave, onBack }) {
-  const [saving, setSaving] = useState({});
-  const [cellErrors, setCellErrors] = useState({});
+  const [saving, setSaving] = useState(false);
+  const [hasChanges, setHasChanges] = useState(false);
+  const [saveResult, setSaveResult] = useState(null);
+  const pendingRef = useRef({});
   const schedule = schedules[activeType];
 
-  async function handleBlur(empIdx, colIdx, el) {
+  function handleChange(empIdx, colIdx, value) {
     const key = `${empIdx}-${colIdx}`;
     const original = schedule?.employees[empIdx]?.assignments[colIdx] ?? "";
-    const next = el.value;
-    if (next === original) return;
-    setSaving((s) => ({ ...s, [key]: true }));
-    setCellErrors((e) => { const c = { ...e }; delete c[key]; return c; });
-    try {
-      await onCellSave(empIdx, colIdx, next);
-    } catch {
-      setCellErrors((e) => ({ ...e, [key]: true }));
-      el.value = original;
-    } finally {
-      setSaving((s) => { const c = { ...s }; delete c[key]; return c; });
+    if (value === original) {
+      delete pendingRef.current[key];
+    } else {
+      pendingRef.current[key] = { empIdx, colIdx, value };
     }
+    setHasChanges(Object.keys(pendingRef.current).length > 0);
+  }
+
+  function handleTypeChange(type) {
+    pendingRef.current = {};
+    setHasChanges(false);
+    setSaveResult(null);
+    onTypeChange(type);
+  }
+
+  async function handleSave() {
+    const changes = Object.values(pendingRef.current);
+    if (!changes.length) return;
+    setSaving(true);
+    setSaveResult(null);
+    let failed = 0;
+    for (const { empIdx, colIdx, value } of changes) {
+      try { await onCellSave(empIdx, colIdx, value); }
+      catch { failed++; }
+    }
+    pendingRef.current = {};
+    setHasChanges(false);
+    setSaving(false);
+    setSaveResult(failed === 0
+      ? { ok: true, message: `${changes.length} cell${changes.length !== 1 ? "s" : ""} saved.` }
+      : { ok: false, message: `${failed} cell${failed !== 1 ? "s" : ""} failed to save.` });
   }
 
   return (
@@ -1426,14 +1478,28 @@ function ManualEntryView({ schedules, activeType, onTypeChange, onCellSave, onBa
               key={t.key}
               type="button"
               className={`shift-type-tab ${activeType === t.key ? "is-active" : ""}`}
-              onClick={() => onTypeChange(t.key)}
+              onClick={() => handleTypeChange(t.key)}
             >
               {t.label}
             </button>
           ))}
         </div>
-        <span className="shift-editor-hint">Click any cell to edit. Changes save automatically.</span>
+        {hasChanges && <span className="shift-unsaved-dot" aria-label="Unsaved changes">Unsaved changes</span>}
+        <button
+          type="button"
+          className="primary-button compact-button shift-save-btn"
+          onClick={handleSave}
+          disabled={!hasChanges || saving}
+        >
+          {saving ? "Saving…" : "Confirm Changes"}
+        </button>
       </div>
+
+      {saveResult && (
+        <div className={saveResult.ok ? "inline-success" : "inline-error"} role={saveResult.ok ? "status" : "alert"}>
+          {saveResult.message}
+        </div>
+      )}
 
       {!schedule || schedule.employees.length === 0 ? (
         <div className="shift-editor-empty">
@@ -1454,23 +1520,17 @@ function ManualEntryView({ schedules, activeType, onTypeChange, onCellSave, onBa
               {schedule.employees.map((emp, empIdx) => (
                 <tr key={emp.name}>
                   <td className="shift-name-col shift-name-cell">{emp.name}</td>
-                  {schedule.columns.map((col, colIdx) => {
-                    const key = `${empIdx}-${colIdx}`;
-                    return (
-                      <td
-                        key={`${emp.name}-${col.label}`}
-                        className={`shift-edit-cell ${saving[key] ? "is-saving" : ""} ${cellErrors[key] ? "is-error" : ""}`}
-                      >
-                        <input
-                          type="text"
-                          defaultValue={emp.assignments[colIdx] ?? ""}
-                          onBlur={(e) => handleBlur(empIdx, colIdx, e.target)}
-                          onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
-                          aria-label={`${emp.name} — ${col.label}`}
-                        />
-                      </td>
-                    );
-                  })}
+                  {schedule.columns.map((col, colIdx) => (
+                    <td key={`${emp.name}-${col.label}`} className="shift-edit-cell">
+                      <input
+                        type="text"
+                        defaultValue={emp.assignments[colIdx] ?? ""}
+                        onChange={(e) => handleChange(empIdx, colIdx, e.target.value)}
+                        onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
+                        aria-label={`${emp.name} — ${col.label}`}
+                      />
+                    </td>
+                  ))}
                 </tr>
               ))}
             </tbody>
@@ -1706,9 +1766,10 @@ function AdminPanel({
 }) {
   const [showPassword, setShowPassword] = useState(false);
   const [view, setView] = useState("dashboard");
+  const [ptoExpanded, setPtoExpanded] = useState(false);
 
   useEffect(() => {
-    if (open) setView(isSystemUser ? "changePassword" : "dashboard");
+    if (open) { setView(isSystemUser ? "changePassword" : "dashboard"); setPtoExpanded(false); }
   }, [open]);
 
   const counts = useMemo(() =>
@@ -1858,15 +1919,38 @@ function AdminPanel({
           )}
 
           {view === "dashboard" && (
-            <PtoLog
-              requests={requests}
-              onReview={onReview}
-              reviewLoadingId={reviewLoadingId}
-              onClearRequest={onClearRequest}
-              clearLoadingId={clearLoadingId}
-              onClearReviewed={onClearReviewed}
-              clearingReviewed={clearingReviewed}
-            />
+            <>
+              <div className="pto-expand-bar">
+                <button
+                  type="button"
+                  className="pto-expand-btn"
+                  onClick={() => setPtoExpanded((v) => !v)}
+                  aria-expanded={ptoExpanded}
+                >
+                  <svg
+                    width="14" height="14" viewBox="0 0 24 24" fill="none"
+                    stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+                    className={`pto-expand-chevron ${ptoExpanded ? "is-open" : ""}`}
+                    aria-hidden="true"
+                  >
+                    <polyline points="6 9 12 15 18 9" />
+                  </svg>
+                  {ptoExpanded ? "Collapse PTO Requests" : `PTO Requests${counts.pending > 0 ? ` — ${counts.pending} pending` : ""}`}
+                </button>
+              </div>
+
+              {ptoExpanded && (
+                <PtoLog
+                  requests={requests}
+                  onReview={onReview}
+                  reviewLoadingId={reviewLoadingId}
+                  onClearRequest={onClearRequest}
+                  clearLoadingId={clearLoadingId}
+                  onClearReviewed={onClearReviewed}
+                  clearingReviewed={clearingReviewed}
+                />
+              )}
+            </>
           )}
           {view === "changePassword" && (
             <ChangePasswordSection />
